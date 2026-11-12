@@ -55,25 +55,24 @@
       <fieldset>
         <legend>Wifi</legend>
         <label for="ssid">Netwerknaam (SSID)</label>
-        <input id="ssid" name="ssid" required maxlength="32" spellcheck="false" autocapitalize="none">
+        <input id="ssid" name="ssid" required maxlength="32" spellcheck="false" autocapitalize="none" value="projectnetwerk5G" aria-describedby="wifi_hulp">
         <label for="wifi_wachtwoord">Wifiwachtwoord</label>
         <input id="wifi_wachtwoord" name="wifi_wachtwoord" type="password" minlength="8" maxlength="63"
                aria-describedby="wifi_hulp">
-        <small id="wifi_hulp">Laat leeg voor een open netwerk.</small>
       </fieldset>
       <fieldset>
         <legend>MQTT</legend>
-        <label for="mqtt_host">Broker</label>
-        <input id="mqtt_host" name="mqtt_host" required maxlength="253" placeholder="192.168.0.25"
-               spellcheck="false" autocapitalize="none" aria-describedby="broker_hulp">
-        <small id="broker_hulp">Een hostname of IPv4-adres.</small>
-        <label for="mqtt_poort">Poort</label>
+        <label for="mqtt_host">MQTT-host</label>
+        <input id="mqtt_host" name="mqtt_host" required maxlength="253" value="brouwapp.local"
+               spellcheck="false" autocapitalize="none" aria-describedby="mqtt_hulp">
+        <label for="mqtt_poort">MQTT-poort</label>
         <input id="mqtt_poort" name="mqtt_poort" required inputmode="numeric" pattern="[0-9]{1,5}"
-               maxlength="5" value="1883">
-        <label for="ketel_id">Ketel-ID</label>
-        <input id="ketel_id" name="ketel_id" required maxlength="32" placeholder="ketel-01"
-               spellcheck="false" autocapitalize="none" aria-describedby="id_hulp">
-        <small id="id_hulp">Letters, cijfers, koppeltekens en underscores.</small>
+               maxlength="5" placeholder="Bv. 1883" aria-describedby="poort_hulp">
+        <label for="mqtt_gebruikersnaam">MQTT-gebruikersnaam</label>
+        <input id="mqtt_gebruikersnaam" name="mqtt_gebruikersnaam" required maxlength="32" spellcheck="false" autocapitalize="none">
+        <label for="mqtt_wachtwoord">MQTT-wachtwoord</label>
+        <input id="mqtt_wachtwoord" name="mqtt_wachtwoord" type="password" minlength="8" maxlength="63"
+               aria-describedby="mqtt_hulp">
       </fieldset>
       <button type="submit">Opslaan en verbinden</button>
     </form>

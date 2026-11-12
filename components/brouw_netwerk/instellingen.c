@@ -63,7 +63,7 @@ const char *brouw_instellingen_fout(const brouw_instellingen_t *instellingen)
     }
     if (instellingen->wifi_wachtwoord[0] != '\0' &&
         !brouw_wpa_wachtwoord_geldig(instellingen->wifi_wachtwoord)) {
-        return "Vul een wifiwachtwoord van 8 tot 63 afdrukbare ASCII-tekens in. "
+        return "Vul een wifiwachtwoord van 4 tot 63 afdrukbare ASCII-tekens in. "
                "Laat het veld leeg voor een open netwerk.";
     }
     if (!brokerhost_geldig(instellingen->mqtt.host, sizeof(instellingen->mqtt.host))) {

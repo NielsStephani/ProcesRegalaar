@@ -22,6 +22,8 @@
 TaskHandle_t temp_handle;
 max31865_t sensor;
 
+const char* webserverPassword = "admin123";
+
 int heating_power = 100; //Placeholder for heating power value, should be set based on your PID logic
 
 static int last_message[8] = {0};
@@ -235,13 +237,12 @@ void receive_task(void *parameters)
 
 void app_main(void)
 {
-    //spi_init();
     scherm_uart_init();
 
     xTaskCreate(temp_task, "Temperature task", 1024*8, NULL, 5, &temp_handle);
     xTaskCreate(receive_task, "Receive task", 1024*8, NULL, 5, NULL);
 
-    const esp_err_t fout = brouw_netwerk_start("admin", false);
+    const esp_err_t fout = brouw_netwerk_start(webserverPassword, false);
     if (fout != ESP_OK) 
     {
         ESP_LOGE("main", "Netwerkstart: %s", esp_err_to_name(fout));

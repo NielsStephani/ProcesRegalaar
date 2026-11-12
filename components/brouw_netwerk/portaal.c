@@ -1,11 +1,13 @@
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "esp_log.h"
 #include "netwerk_priv.h"
 
 #define FORMULIER_MAX 1280
 #define SETUP_HOST "192.168.4.1"
+#define SETUP_HOSTNAAM "Brouwketel-setup.local"
 #define FORMULIER_TYPE "application/x-www-form-urlencoded"
 
 extern const char formulier_html_start[] asm("_binary_formulier_html_start");
@@ -128,19 +130,42 @@ static esp_err_t weiger_en_sluit(httpd_req_t *verzoek, const char *status, const
     return ESP_FAIL;
 }
 
+static bool host_komt_overeen(const char *waarde, const char *naam)
+{
+    const size_t lengte = strlen(naam);
+
+    return strncasecmp(waarde, naam, lengte) == 0 &&
+           (waarde[lengte] == '\0' || strcmp(waarde + lengte, ":80") == 0);
+}
+
 static bool lokaal_verzoek(httpd_req_t *verzoek)
 {
-    char host[sizeof(SETUP_HOST ":80")];
-    if (httpd_req_get_hdr_value_str(verzoek, "Host", host, sizeof(host)) != ESP_OK ||
-        (strcmp(host, SETUP_HOST) != 0 && strcmp(host, SETUP_HOST ":80") != 0)) {
+    char host[64];
+    if (httpd_req_get_hdr_value_str(verzoek, "Host", host, sizeof(host)) != ESP_OK) {
         return false;
     }
-    if (httpd_req_get_hdr_value_len(verzoek, "Origin") == 0) {
+
+    const char *verwachte_host;
+    if (host_komt_overeen(host, SETUP_HOST)) {
+        verwachte_host = SETUP_HOST;
+    } else if (host_komt_overeen(host, SETUP_HOSTNAAM)) {
+        verwachte_host = SETUP_HOSTNAAM;
+    } else {
+        return false;
+    }
+
+    const char schema[] = "http://";
+    char origin[sizeof(host) + sizeof(schema) - 1];
+    const esp_err_t fout =
+        httpd_req_get_hdr_value_str(verzoek, "Origin", origin, sizeof(origin));
+
+    if (fout == ESP_ERR_NOT_FOUND) {
         return true;
     }
-    char origin[sizeof("http://" SETUP_HOST ":80")];
-    return httpd_req_get_hdr_value_str(verzoek, "Origin", origin, sizeof(origin)) == ESP_OK &&
-           (strcmp(origin, "http://" SETUP_HOST) == 0 || strcmp(origin, "http://" SETUP_HOST ":80") == 0);
+
+    return fout == ESP_OK &&
+           strncasecmp(origin, schema, sizeof(schema) - 1) == 0 &&
+           host_komt_overeen(origin + sizeof(schema) - 1, verwachte_host);
 }
 
 static esp_err_t formulier_get(httpd_req_t *verzoek)
