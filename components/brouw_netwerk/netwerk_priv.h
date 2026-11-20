@@ -6,6 +6,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#define SETUP_HOST "192.168.4.1"
+
 typedef struct {
     uint16_t versie;
     brouw_netwerk_mqtt_t mqtt;

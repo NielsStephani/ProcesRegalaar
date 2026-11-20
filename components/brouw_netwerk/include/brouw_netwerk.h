@@ -19,15 +19,20 @@ typedef enum {
 } brouw_netwerk_status_t;
 
 typedef struct {
-    char host[254];
-    char ketel_id[33];
+    char host[64];
     uint16_t poort;
+    char gebruikersnaam[64];
+    char wachtwoord[64];
 } brouw_netwerk_mqtt_t;
 
 /* Roep eenmaal op vanuit app_main. De component beheert beide wifi-modi.
  * setup_wachtwoord beveiligt de hotspot en bevat 8–63 afdrukbare ASCII-tekens.
  * setup_afdwingen opent het formulier ook wanneer er al instellingen zijn.
  * De verbinding en het formulier draaien in aparte taken. */
+/*
+Eenmaal aanroepen vanuit app_main
+
+*/
 esp_err_t brouw_netwerk_start(const char *setup_wachtwoord, bool setup_afdwingen);
 
 /* IP_GEREED betekent dat de station-interface een IPv4-adres heeft. */

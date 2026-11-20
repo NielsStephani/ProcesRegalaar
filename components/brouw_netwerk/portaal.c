@@ -5,15 +5,13 @@
 #include "esp_log.h"
 #include "netwerk_priv.h"
 
-#define FORMULIER_MAX 1280
-#define SETUP_HOST "192.168.4.1"
-#define SETUP_HOSTNAAM "Brouwketel-setup.local"
+#define FORMULIER_MAX 1536
 #define FORMULIER_TYPE "application/x-www-form-urlencoded"
 
 extern const char formulier_html_start[] asm("_binary_formulier_html_start");
 
 static const char *TAG = "brouw_portaal";
-//De HTTP-server handelt deze verzoeken af in één taak.
+// De HTTP-server handelt deze verzoeken af in één taak.
 static bool s_bewaard;
 
 static int hex_cijfer(unsigned char teken)
@@ -71,7 +69,8 @@ static const char *formulier_lezen(char *inhoud, brouw_instellingen_t *instellin
         {"wifi_wachtwoord", instellingen->wifi_wachtwoord, sizeof(instellingen->wifi_wachtwoord), false},
         {"mqtt_host", instellingen->mqtt.host, sizeof(instellingen->mqtt.host), false},
         {"mqtt_poort", poort, sizeof(poort), false},
-        {"ketel_id", instellingen->mqtt.ketel_id, sizeof(instellingen->mqtt.ketel_id), false},
+        {"mqtt_gebruikersnaam", instellingen->mqtt.gebruikersnaam, sizeof(instellingen->mqtt.gebruikersnaam), false},
+        {"mqtt_wachtwoord", instellingen->mqtt.wachtwoord, sizeof(instellingen->mqtt.wachtwoord), false},
     };
     const size_t aantal_velden = sizeof(velden) / sizeof(velden[0]);
     char *volgend = NULL;
@@ -105,14 +104,20 @@ static const char *formulier_lezen(char *inhoud, brouw_instellingen_t *instellin
         }
     }
 
-    if (poort[0] == '\0' || strspn(poort, "0123456789") != strlen(poort)) {
-        return "Vul een MQTT-poort van 1 tot 65535 in.";
+    brouw_netwerk_mqtt_t *mqtt = &instellingen->mqtt;
+    if (mqtt->host[0] != '\0' || poort[0] != '\0' ||
+        mqtt->gebruikersnaam[0] != '\0' || mqtt->wachtwoord[0] != '\0') {
+        if (mqtt->host[0] == '\0' || poort[0] == '\0' ||
+            mqtt->gebruikersnaam[0] == '\0' || mqtt->wachtwoord[0] == '\0') {
+            return "Vul de vier MQTT-velden in of laat ze allemaal leeg.";
+        }
+        const unsigned long poort_nummer = strtoul(poort, NULL, 10);
+        if (strspn(poort, "0123456789") != strlen(poort) ||
+            poort_nummer == 0 || poort_nummer > UINT16_MAX) {
+            return "Vul een MQTT-poort van 1 tot 65535 in.";
+        }
+        mqtt->poort = (uint16_t)poort_nummer;
     }
-    const unsigned long poort_nummer = strtoul(poort, NULL, 10);
-    if (poort_nummer == 0 || poort_nummer > UINT16_MAX) {
-        return "Vul een MQTT-poort van 1 tot 65535 in.";
-    }
-    instellingen->mqtt.poort = (uint16_t)poort_nummer;
     return brouw_instellingen_fout(instellingen);
 }
 
@@ -130,42 +135,23 @@ static esp_err_t weiger_en_sluit(httpd_req_t *verzoek, const char *status, const
     return ESP_FAIL;
 }
 
-static bool host_komt_overeen(const char *waarde, const char *naam)
-{
-    const size_t lengte = strlen(naam);
-
-    return strncasecmp(waarde, naam, lengte) == 0 &&
-           (waarde[lengte] == '\0' || strcmp(waarde + lengte, ":80") == 0);
-}
-
 static bool lokaal_verzoek(httpd_req_t *verzoek)
 {
-    char host[64];
-    if (httpd_req_get_hdr_value_str(verzoek, "Host", host, sizeof(host)) != ESP_OK) {
+    char host[sizeof(SETUP_HOST ":80")];
+    if (httpd_req_get_hdr_value_str(verzoek, "Host", host, sizeof(host)) != ESP_OK ||
+        (strcmp(host, SETUP_HOST) != 0 && strcmp(host, SETUP_HOST ":80") != 0)) {
         return false;
     }
 
-    const char *verwachte_host;
-    if (host_komt_overeen(host, SETUP_HOST)) {
-        verwachte_host = SETUP_HOST;
-    } else if (host_komt_overeen(host, SETUP_HOSTNAAM)) {
-        verwachte_host = SETUP_HOSTNAAM;
-    } else {
-        return false;
-    }
-
-    const char schema[] = "http://";
-    char origin[sizeof(host) + sizeof(schema) - 1];
+    char origin[sizeof("http://" SETUP_HOST ":80")];
     const esp_err_t fout =
         httpd_req_get_hdr_value_str(verzoek, "Origin", origin, sizeof(origin));
-
     if (fout == ESP_ERR_NOT_FOUND) {
         return true;
     }
-
     return fout == ESP_OK &&
-           strncasecmp(origin, schema, sizeof(schema) - 1) == 0 &&
-           host_komt_overeen(origin + sizeof(schema) - 1, verwachte_host);
+           (strcasecmp(origin, "http://" SETUP_HOST) == 0 ||
+            strcasecmp(origin, "http://" SETUP_HOST ":80") == 0);
 }
 
 static esp_err_t formulier_get(httpd_req_t *verzoek)
@@ -195,25 +181,32 @@ static esp_err_t formulier_post(httpd_req_t *verzoek)
         return weiger_en_sluit(verzoek, "400 Bad Request", "Het formulier is leeg of te groot.");
     }
 
-    char inhoud[FORMULIER_MAX + 1];
+    char *inhoud = malloc(verzoek->content_len + 1);
+    if (inhoud == NULL) {
+        return weiger_en_sluit(verzoek, "503 Service Unavailable", "Te weinig geheugen om het formulier te ontvangen.");
+    }
     size_t ontvangen = 0;
     while (ontvangen < verzoek->content_len) {
         const int gelezen = httpd_req_recv(verzoek, inhoud + ontvangen, verzoek->content_len - ontvangen);
         if (gelezen == HTTPD_SOCK_ERR_TIMEOUT) {
+            free(inhoud);
             return weiger_en_sluit(verzoek, "408 Request Timeout", "Het ontvangen van de instellingen duurde te lang.");
         }
         if (gelezen <= 0) {
+            free(inhoud);
             return ESP_FAIL;
         }
         ontvangen += (size_t)gelezen;
     }
     if (memchr(inhoud, '\0', ontvangen) != NULL) {
+        free(inhoud);
         return antwoord(verzoek, "400 Bad Request", "Het formulier bevat een ongeldig teken.");
     }
     inhoud[ontvangen] = '\0';
 
     brouw_instellingen_t instellingen = {0};
     const char *invoerfout = formulier_lezen(inhoud, &instellingen);
+    free(inhoud);
     if (invoerfout != NULL) {
         return antwoord(verzoek, "400 Bad Request", invoerfout);
     }
@@ -226,8 +219,8 @@ static esp_err_t formulier_post(httpd_req_t *verzoek)
 
     s_bewaard = true;
     const esp_err_t verzonden = antwoord(verzoek, "200 OK",
-        "Instellingen opgeslagen. Het setupnetwerk sluit en de ESP32 probeert de gekozen wifi. "
-        "Kijk in de seriële monitor voor het IP-adres. Verschijnt het setupnetwerk opnieuw, "
+        "Instellingen opgeslagen. Het setupnetwerk sluit en de ESP32 probeert de gekozen wifi.\n\r"
+        "Verschijnt het setupnetwerk opnieuw, dan kan er geen verbinding met de gekozen wifi gemaakt worden.\n\r"
         "open dan het formulier om de wifi-instellingen te corrigeren.");
     xTaskNotifyGive((TaskHandle_t)verzoek->user_ctx);
     return verzonden;

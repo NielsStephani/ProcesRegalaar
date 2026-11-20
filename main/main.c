@@ -11,7 +11,9 @@
 #include "max31865.h"
 #include "scherm_uart.h"
 #include "brouw_netwerk.h"
+#include "brouw_mqtt.h"
 #include "esp_log.h"
+
 
 #define SPI_HOST    SPI2_HOST
 #define PIN_NUM_MISO 13
@@ -247,6 +249,8 @@ void app_main(void)
     {
         ESP_LOGE("main", "Netwerkstart: %s", esp_err_to_name(fout));
     }
+
+    ESP_ERROR_CHECK(brouw_mqtt_init("Brouwketel 1", true));
 
     /*
     while(1)

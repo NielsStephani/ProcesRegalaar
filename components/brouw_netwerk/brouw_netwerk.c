@@ -10,7 +10,6 @@
 #include "freertos/event_groups.h"
 #include "netwerk_priv.h"
 #include "nvs_flash.h"
-#include "mdns.h"
 
 #define EERSTE_IP_TIMEOUT_MS 25000
 #define HERPROBEER_MS 2000
@@ -31,8 +30,6 @@ static esp_netif_t *s_station;
 static esp_netif_t *s_ap;
 static char s_setup_wachtwoord[64];
 static bool s_setup_afdwingen;
-
-const char* dnsName = "Brouwketel-setup";
 
 static void netwerk_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -65,6 +62,8 @@ static esp_err_t station_start(const brouw_instellingen_t *instellingen)
     memcpy(wifi.sta.ssid, instellingen->ssid, strlen(instellingen->ssid));
     memcpy(wifi.sta.password, instellingen->wifi_wachtwoord, strlen(instellingen->wifi_wachtwoord));
     wifi.sta.threshold.authmode = wifi.sta.password[0] == 0 ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
+    printf("Het SSID is: %s\n", wifi.sta.ssid);
+    printf("Het wachtwoord is: %s\n", wifi.sta.password);
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "Instellen stationmodus");
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wifi), TAG, "Instellen stationconfiguratie");
@@ -129,29 +128,13 @@ static esp_err_t setup_wachten(void)
         esp_wifi_stop();
         return fout;
     }
-    esp_err_t mdns_fout = mdns_init();
-    const bool mdns_gestart = (mdns_fout == ESP_OK);
 
-    if (mdns_gestart) 
-    {
-        mdns_fout = mdns_hostname_set(dnsName);
-    }
-    if (mdns_fout != ESP_OK) 
-    {
-        ESP_LOGW(TAG, "mDNS: %s", esp_err_to_name(mdns_fout));
-    }
     xEventGroupSetBits(s_events, SETUP_ACTIEF);
-    ESP_LOGI(TAG, "Verbind met %s en open http://192.168.4.1/", (const char *)wifi.ap.ssid);
+    ESP_LOGI(TAG, "Verbind met %s en open http://" SETUP_HOST "/", (const char *)wifi.ap.ssid);
 
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     // Laat de HTTP-respons vertrekken voordat het wifi-netwerk verdwijnt.
     vTaskDelay(pdMS_TO_TICKS(SLUIT_PORTAAL_NA_MS));
-
-    if (mdns_gestart) 
-    {
-        mdns_free();
-    }
-
     const esp_err_t portaal_fout = httpd_stop(server);
     const esp_err_t stop_fout = esp_wifi_stop();
     xEventGroupClearBits(s_events, SETUP_ACTIEF);
@@ -201,7 +184,7 @@ static void netwerktaak(void *arg)
     vTaskDelete(NULL);
 }
 
-esp_err_t brouw_netwerk_start(const char* setup_wachtwoord, bool setup_afdwingen)
+esp_err_t brouw_netwerk_start(const char *setup_wachtwoord, bool setup_afdwingen)
 {
     if (setup_wachtwoord == NULL || !brouw_wpa_wachtwoord_geldig(setup_wachtwoord)) {
         return ESP_ERR_INVALID_ARG;
@@ -299,8 +282,12 @@ esp_err_t brouw_netwerk_lees_mqtt(brouw_netwerk_mqtt_t *mqtt)
     }
     brouw_instellingen_t instellingen;
     const esp_err_t fout = brouw_instellingen_lees(&instellingen);
-    if (fout == ESP_OK) {
-        *mqtt = instellingen.mqtt;
+    if (fout != ESP_OK) {
+        return fout;
     }
-    return fout;
+    if (instellingen.mqtt.host[0] == '\0') {
+        return ESP_ERR_NOT_FOUND;
+    }
+    *mqtt = instellingen.mqtt;
+    return ESP_OK;
 }

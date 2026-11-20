@@ -72,17 +72,6 @@ const char *brouw_instellingen_fout(const brouw_instellingen_t *instellingen)
     if (instellingen->mqtt.poort == 0) {
         return "Vul een MQTT-poort van 1 tot 65535 in.";
     }
-
-    const char *ketel_id = instellingen->mqtt.ketel_id;
-    const size_t id_lengte = strnlen(ketel_id, sizeof(instellingen->mqtt.ketel_id));
-    if (id_lengte == 0 || id_lengte == sizeof(instellingen->mqtt.ketel_id)) {
-        return "De ketel-ID moet 1 tot 32 tekens bevatten.";
-    }
-    for (size_t i = 0; i < id_lengte; ++i) {
-        if (!ascii_letter_of_cijfer(ketel_id[i]) && ketel_id[i] != '-' && ketel_id[i] != '_') {
-            return "Gebruik letters, cijfers, een koppelteken of een underscore voor de ketel-ID.";
-        }
-    }
     return NULL;
 }
 
