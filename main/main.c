@@ -31,6 +31,154 @@ int heating_power = 100; //Placeholder for heating power value, should be set ba
 static int last_message[8] = {0};
 static int next_index = 0;
 
+static bool net_toestand_versturen(bool wifi, bool mqtt, bool configuratie)
+{
+    char ssid[33] = "";
+    brouw_netwerk_lees_ssid(ssid);
+
+    brouw_netwerk_mqtt_t broker = {0};
+    char poort[6] = "";
+
+    if (brouw_netwerk_lees_mqtt(&broker) == ESP_OK) {
+        snprintf(poort, sizeof(poort), "%u",
+                 (unsigned)broker.poort);
+    }
+
+    // Zonder wifi kan MQTT niet verbonden zijn.
+    mqtt = wifi && mqtt;
+
+    cJSON *json = cJSON_CreateObject();
+
+    if (json == NULL ||
+        cJSON_AddStringToObject(json, "wifi",
+                                wifi ? "true" : "false") == NULL ||
+        cJSON_AddStringToObject(json, "mqtt",
+                                mqtt ? "true" : "false") == NULL ||
+        cJSON_AddStringToObject(json, "modus",
+                                configuratie
+                                ? "configuratie" : "werking") == NULL ||
+        cJSON_AddStringToObject(json, "ssid", ssid) == NULL ||
+        cJSON_AddStringToObject(json, "server", broker.host) == NULL ||
+        cJSON_AddStringToObject(json, "poort", poort) == NULL) {
+        cJSON_Delete(json);
+        return false;
+    }
+
+    char *inhoud = cJSON_PrintUnformatted(json);
+    cJSON_Delete(json);
+
+    if (inhoud == NULL) {
+        return false;
+    }
+
+    scherm_uart_verstuur("net/toestand", inhoud);
+
+    cJSON_free(inhoud);
+    return true;
+}
+
+static void net_toestand_taak(void *arg)
+{
+    (void)arg;
+
+    uint32_t afgehandeld = 0;
+    bool bewaken = false;
+    bool forceer = false;
+
+    bool vorige_geldig = false;
+    bool vorige_wifi = false;
+    bool vorige_mqtt = false;
+    bool vorige_configuratie = false;
+
+    for (;;) {
+        const uint32_t nummer =
+            brouw_netwerk_configuratienummer();
+
+        // Nieuwe configuratie: wacht eerst op het resultaat.
+        if (nummer != afgehandeld) {
+            brouw_mqtt_stop();
+            const esp_err_t mqtt_start = brouw_mqtt_start();
+
+            TickType_t begin = xTaskGetTickCount();
+
+            while (brouw_netwerk_configuratienummer() == nummer &&
+                   !brouw_netwerk_verbindingspoging_klaar() &&
+                   xTaskGetTickCount() - begin <
+                       pdMS_TO_TICKS(30000)) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+
+            // Een nieuwe opslag vervangt de lopende poging.
+            if (brouw_netwerk_configuratienummer() != nummer) {
+                continue;
+            }
+
+            if (brouw_netwerk_status() ==
+                    BROUW_NETWERK_IP_GEREED &&
+                mqtt_start == ESP_OK) {
+
+                begin = xTaskGetTickCount();
+
+                while (brouw_netwerk_configuratienummer() == nummer &&
+                       brouw_netwerk_status() ==
+                           BROUW_NETWERK_IP_GEREED &&
+                       !brouw_mqtt_is_verbonden() &&
+                       !brouw_mqtt_verbindingspoging_mislukt() &&
+                       xTaskGetTickCount() - begin <
+                           pdMS_TO_TICKS(15000)) {
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                }
+            }
+
+            if (brouw_netwerk_configuratienummer() != nummer) {
+                continue;
+            }
+
+            afgehandeld = nummer;
+            bewaken = true;
+
+            // Na iedere opslag één resultaatbericht,
+            // ook als de uitkomst hetzelfde is als daarvoor.
+            forceer = true;
+        }
+
+        // Na het eerste resultaat: alleen wijzigingen melden.
+        if (bewaken &&
+            brouw_netwerk_configuratienummer() == afgehandeld) {
+
+            const brouw_netwerk_status_t toestand =
+                brouw_netwerk_status();
+
+            const bool wifi =
+                toestand == BROUW_NETWERK_IP_GEREED;
+
+            const bool mqtt =
+                wifi && brouw_mqtt_is_verbonden();
+
+            const bool configuratie =
+                toestand == BROUW_NETWERK_SETUP;
+
+            if (forceer || !vorige_geldig ||
+                wifi != vorige_wifi ||
+                mqtt != vorige_mqtt ||
+                configuratie != vorige_configuratie) {
+
+                if (net_toestand_versturen(
+                        wifi, mqtt, configuratie)) {
+
+                    vorige_wifi = wifi;
+                    vorige_mqtt = mqtt;
+                    vorige_configuratie = configuratie;
+                    vorige_geldig = true;
+                    forceer = false;
+                }
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
 static bool message_is_new(int nr)
 {
     for(int i = 0; i < 8; i++)
@@ -153,8 +301,22 @@ static void bericht_verwerken(const scherm_uart_bericht_t *bericht)
         printf("Doel: %.1f C, pomp gevraagd: %s\n",
                doeltemperatuur, pomp_aan ? "aan" : "uit");
 
-        //Hier de doeltemperatuur en pomptoestand doorgeven aan de PID-regelaa en sturing pomp
+        //Hier de doeltemperatuur en pomptoestand doorgeven aan de PID-regelaar en sturing pomp
         //Ontbrekende kp/ki/kd moeten daar hun vorige waarde behouden
+    }
+     else if (strcmp(bericht->onderwerp, "brouw/status") == 0)
+    {
+        cJSON* server = cJSON_GetObjectItemCaseSensitive(data, "server");
+        cJSON* poort = cJSON_GetObjectItemCaseSensitive(data, "poort");
+
+        char* server_IP = cJSON_IsString(server) ? server->valuestring : "onbekend";
+        int poort_nummer = cJSON_IsNumber(poort) ? (int)poort->valuedouble : 0;
+
+        printf("Server: %s, Poort: %d\n", server_IP, poort_nummer);
+
+        char json[100];
+        snprintf(json, sizeof(json), "{\"status\":\"verbonden\"}");
+        scherm_uart_verstuur("net/status", json);
     }
     else if (strcmp(bericht->onderwerp, "net/start") == 0)
     {
@@ -166,7 +328,7 @@ static void bericht_verwerken(const scherm_uart_bericht_t *bericht)
 
         printf("Server: %s, Poort: %d\n", server_IP, poort_nummer);
 
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Simulate some processing delay
+        vTaskDelay(pdMS_TO_TICKS(1000));
 
         char json[100];
         snprintf(json, sizeof(json), "{\"status\":\"verbonden\"}");
@@ -177,25 +339,42 @@ static void bericht_verwerken(const scherm_uart_bericht_t *bericht)
         printf("Stop commando ontvangen.\n");
         //Hier de stop van het brouwproces starten
     }
-    else if (strcmp(bericht->onderwerp, "brouw/status") == 0)
+    else if (strcmp(bericht->onderwerp, "net/modus") == 0)
     {
-        cJSON* server = cJSON_GetObjectItemCaseSensitive(data, "server");
-        cJSON* poort = cJSON_GetObjectItemCaseSensitive(data, "poort");
+        const char *modus = cJSON_GetStringValue(
+            cJSON_GetObjectItemCaseSensitive(data, "modus")
+        );
 
-        char* server_IP = cJSON_IsString(server) ? server->valuestring : "onbekend";
-        int poort_nummer = cJSON_IsNumber(poort) ? (int)poort->valuedouble : 0;
+        esp_err_t fout = ESP_ERR_INVALID_ARG;
 
-        printf("Server: %s, Poort: %d\n", server_IP, poort_nummer);
+        if (modus != NULL) {
+            if (strcmp(modus, "configuratie") == 0) {
+                fout = brouw_netwerk_vraag_setup();
+            } else if (strcmp(modus, "werking") == 0) {
+                fout = brouw_netwerk_vraag_werking();
+            }
+        }
 
-        char json[100];
-        snprintf(json, sizeof(json), "{\"status\":\"verbonden\"}");
-        scherm_uart_verstuur("net/status", json);
+        if (fout != ESP_OK) {
+            ESP_LOGW("net_modus", "Modusaanvraag mislukt: %s",
+                 esp_err_to_name(fout));
+        }
+    }
+    else if(strcmp(bericht->onderwerp, "") == 0)
+    {
+        //Hier kan code komen om een ander onderwerp te verwerken
+    }
+    else if(strcmp(bericht->onderwerp, "") == 0)
+    {
+        //Hier kan code komen om een ander onderwerp te verwerken
+    }
+    else if(strcmp(bericht->onderwerp, "") == 0)
+    {
+        //Hier kan code komen om een ander onderwerp te verwerken
     }
     else
     {
-        printf("Ontvangen: %s %s\n", bericht->onderwerp, bericht->json);
-        //TODO: brouw/status, net/start en net/stop aan je procescode doorgeven.
-        //net/start en net/stop krijgen GEEN ack; resultaat gaat via net/status.
+        printf("Onbekend onderwerp: %s\n", bericht->onderwerp);
     }
 
     cJSON_Delete(data);
@@ -252,12 +431,8 @@ void app_main(void)
 
     ESP_ERROR_CHECK(brouw_mqtt_init("Brouwketel 1", true));
 
-    /*
-    while(1)
-    {   
-        //Geeft aan hoeveel geheugen er door taak wordt gebruikt
-        printf("stack gebruikt: %ld\n", uxTaskGetStackHighWaterMark2(temp_handle));
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    if (xTaskCreate(net_toestand_taak, "net_toestand", 1024 * 8, NULL, 5, NULL) != pdPASS) 
+    {
+        ESP_LOGE("main", "Kan netwerktoestand-taak niet starten");
     }
-    */
 }

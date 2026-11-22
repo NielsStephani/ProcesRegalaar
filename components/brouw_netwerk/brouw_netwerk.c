@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include "esp_check.h"
 #include "esp_event.h"
@@ -22,6 +23,8 @@ enum {
     STATION_VERBIND = BIT3,
     SETUP_ACTIEF = BIT4,
     NETWERK_FOUT = BIT5,
+    MODUS_AANGEVRAAGD = BIT6,
+    WIFI_POGING_KLAAR = BIT7,
 };
 
 static const char *TAG = "brouw_netwerk";
@@ -30,6 +33,46 @@ static esp_netif_t *s_station;
 static esp_netif_t *s_ap;
 static char s_setup_wachtwoord[64];
 static bool s_setup_afdwingen;
+static atomic_bool s_setup_gewenst;
+static atomic_bool s_gestart = false;
+static atomic_uint s_configuratienummer = 0;
+
+uint32_t brouw_netwerk_configuratienummer(void)
+{
+    return atomic_load(&s_configuratienummer);
+}
+
+bool brouw_netwerk_verbindingspoging_klaar(void)
+{
+    return atomic_load(&s_gestart) &&
+           (xEventGroupGetBits(s_events) & WIFI_POGING_KLAAR) != 0;
+}
+
+void brouw_netwerk_configuratie_opgeslagen(void)
+{
+    xEventGroupClearBits(s_events, WIFI_POGING_KLAAR);
+    atomic_fetch_add(&s_configuratienummer, 1);
+
+    brouw_netwerk_vraag_werking();
+}
+
+esp_err_t brouw_netwerk_lees_ssid(char ssid[33])
+{
+    if (ssid == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ssid[0] = '\0';
+
+    brouw_instellingen_t instellingen;
+    const esp_err_t fout = brouw_instellingen_lees(&instellingen);
+
+    if (fout == ESP_OK) {
+        memcpy(ssid, instellingen.ssid, sizeof(instellingen.ssid));
+    }
+
+    return fout;
+}
 
 static void netwerk_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -42,13 +85,15 @@ static void netwerk_event(void *arg, esp_event_base_t base, int32_t id, void *da
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *event = data;
         ESP_LOGW(TAG, "Wifi niet verbonden (reden %u).", (unsigned)event->reason);
+        ESP_LOGW(TAG, "Probeer opnieuw te verbinden met WiFi-netwerk via de hotspot.");
         xEventGroupClearBits(s_events, STATION_HEEFT_IP);
         xEventGroupSetBits(s_events, STATION_VERBIND);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *event = data;
         if (event->esp_netif == s_station) {
             ESP_LOGI(TAG, "Wifi IPv4-adres: " IPSTR, IP2STR(&event->ip_info.ip));
-            xEventGroupSetBits(s_events, STATION_HEEFT_IP | STATION_IP_EVENT);
+            ESP_LOGI(TAG, "Verbonden met WiFi-netwerk.");
+            xEventGroupSetBits(s_events, STATION_HEEFT_IP | STATION_IP_EVENT | WIFI_POGING_KLAAR);
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP) {
         xEventGroupClearBits(s_events, STATION_HEEFT_IP);
@@ -62,8 +107,6 @@ static esp_err_t station_start(const brouw_instellingen_t *instellingen)
     memcpy(wifi.sta.ssid, instellingen->ssid, strlen(instellingen->ssid));
     memcpy(wifi.sta.password, instellingen->wifi_wachtwoord, strlen(instellingen->wifi_wachtwoord));
     wifi.sta.threshold.authmode = wifi.sta.password[0] == 0 ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
-    printf("Het SSID is: %s\n", wifi.sta.ssid);
-    printf("Het wachtwoord is: %s\n", wifi.sta.password);
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "Instellen stationmodus");
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wifi), TAG, "Instellen stationconfiguratie");
@@ -85,8 +128,12 @@ static esp_err_t station_onderhouden(void)
             wachttijd = verstreken < timeout ? timeout - verstreken : 0;
         }
 
-        const EventBits_t events = xEventGroupWaitBits(s_events, STATION_IP_EVENT | STATION_VERBIND,
+        const EventBits_t events = xEventGroupWaitBits(s_events, STATION_IP_EVENT | STATION_VERBIND | MODUS_AANGEVRAAGD,
                                                       pdTRUE, pdFALSE, wachttijd);
+        if ((events & MODUS_AANGEVRAAGD) != 0 && atomic_load(&s_setup_gewenst)) 
+        {
+            return ESP_OK;
+        }
         if ((events & STATION_IP_EVENT) != 0) {
             eerste_ip_gekregen = true;
         }
@@ -129,10 +176,22 @@ static esp_err_t setup_wachten(void)
         return fout;
     }
 
-    xEventGroupSetBits(s_events, SETUP_ACTIEF);
+    xEventGroupSetBits(s_events, SETUP_ACTIEF | WIFI_POGING_KLAAR);
     ESP_LOGI(TAG, "Verbind met %s en open http://" SETUP_HOST "/", (const char *)wifi.ap.ssid);
 
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    for (;;) {
+        xEventGroupWaitBits(
+            s_events,
+            MODUS_AANGEVRAAGD,
+            pdTRUE,
+            pdFALSE,
+            portMAX_DELAY
+        );
+
+        if (!atomic_load(&s_setup_gewenst)) {
+            break;
+        }
+    }
     // Laat de HTTP-respons vertrekken voordat het wifi-netwerk verdwijnt.
     vTaskDelay(pdMS_TO_TICKS(SLUIT_PORTAAL_NA_MS));
     const esp_err_t portaal_fout = httpd_stop(server);
@@ -147,7 +206,7 @@ static void netwerktaak(void *arg)
     esp_err_t fout;
 
     for (;;) {
-        if (open_setup) {
+        if (open_setup || atomic_load(&s_setup_gewenst)) {
             fout = setup_wachten();
             if (fout != ESP_OK) {
                 break;
@@ -180,7 +239,7 @@ static void netwerktaak(void *arg)
     }
 
     ESP_LOGE(TAG, "Netwerktaak gestopt: %s", esp_err_to_name(fout));
-    xEventGroupSetBits(s_events, NETWERK_FOUT);
+    xEventGroupSetBits(s_events, NETWERK_FOUT | WIFI_POGING_KLAAR);
     vTaskDelete(NULL);
 }
 
@@ -229,9 +288,14 @@ esp_err_t brouw_netwerk_start(const char *setup_wachtwoord, bool setup_afdwingen
 
     strcpy(s_setup_wachtwoord, setup_wachtwoord);
     s_setup_afdwingen = setup_afdwingen;
-    if (xTaskCreate(netwerktaak, "brouw_netwerk", 4096, NULL, tskIDLE_PRIORITY + 2, NULL) == pdPASS) {
+    atomic_store(&s_setup_gewenst, setup_afdwingen);
+
+    if (xTaskCreate(netwerktaak, "brouw_netwerk", 4096, NULL,
+                tskIDLE_PRIORITY + 2, NULL) == pdPASS) {
+        atomic_store(&s_gestart, true);
         return ESP_OK;
     }
+
     ret = ESP_ERR_NO_MEM;
 
 fail:
@@ -257,10 +321,33 @@ fail:
     return ret;
 }
 
+static esp_err_t modus_aanvragen(bool configuratie)
+{
+    if (!atomic_load(&s_gestart) ||
+        (xEventGroupGetBits(s_events) & NETWERK_FOUT) != 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    atomic_store(&s_setup_gewenst, configuratie);
+    xEventGroupSetBits(s_events, MODUS_AANGEVRAAGD);
+
+    return ESP_OK;
+}
+
+esp_err_t brouw_netwerk_vraag_setup(void)
+{
+    return modus_aanvragen(true);
+}
+
+esp_err_t brouw_netwerk_vraag_werking(void)
+{
+    return modus_aanvragen(false);
+}
+
 brouw_netwerk_status_t brouw_netwerk_status(void)
 {
-    if (s_events == NULL) {
-        return BROUW_NETWERK_UIT;
+    if (!atomic_load(&s_gestart)) {
+    return BROUW_NETWERK_UIT;
     }
     const EventBits_t bits = xEventGroupGetBits(s_events);
     if ((bits & NETWERK_FOUT) != 0) {

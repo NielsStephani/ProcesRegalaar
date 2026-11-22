@@ -24,7 +24,8 @@ static bool onderwerp_ontvangen_bekend(const char *onderwerp)
            strcmp(onderwerp, "brouw/status") == 0 ||
            strcmp(onderwerp, "brouw/meld") == 0 ||
            strcmp(onderwerp, "net/start") == 0 ||
-           strcmp(onderwerp, "net/stop") == 0;
+           strcmp(onderwerp, "net/stop") == 0 ||
+           strcmp(onderwerp, "net/modus") == 0;
 }
 
 //Alleen deze onderwerpen sturen wij NAAR het scherm.
@@ -32,6 +33,7 @@ static bool onderwerp_versturen_bekend(const char *onderwerp)
 {
     return strcmp(onderwerp, "ketel/temp") == 0 ||
            strcmp(onderwerp, "net/status") == 0 ||
+           strcmp(onderwerp, "net/toestand") == 0 ||
            strcmp(onderwerp, "recept") == 0 ||
            strcmp(onderwerp, "ack") == 0;
 }

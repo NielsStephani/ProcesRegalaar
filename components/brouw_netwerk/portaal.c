@@ -1,9 +1,12 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
+#include "cJSON.h"
 #include "esp_log.h"
 #include "netwerk_priv.h"
+#include "nvs.h"
 
 #define FORMULIER_MAX 1536
 #define FORMULIER_TYPE "application/x-www-form-urlencoded"
@@ -164,6 +167,61 @@ static esp_err_t formulier_get(httpd_req_t *verzoek)
     return httpd_resp_sendstr(verzoek, formulier_html_start);
 }
 
+static esp_err_t instellingen_get(httpd_req_t *verzoek)
+{
+    if (!lokaal_verzoek(verzoek)) {
+        return antwoord(verzoek, "403 Forbidden", "Open http://" SETUP_HOST "/");
+    }
+
+    brouw_instellingen_t instellingen = {0};
+    const esp_err_t leesfout = brouw_instellingen_lees(&instellingen);
+    if (leesfout == ESP_ERR_NVS_NOT_FOUND || leesfout == ESP_ERR_INVALID_SIZE ||
+        leesfout == ESP_ERR_INVALID_VERSION || leesfout == ESP_ERR_INVALID_ARG) {
+        memset(&instellingen, 0, sizeof(instellingen));
+    } else if (leesfout != ESP_OK) {
+        ESP_LOGE(TAG, "Instellingen lezen: %s", esp_err_to_name(leesfout));
+        return antwoord(verzoek, "500 Internal Server Error", "De instellingen konden niet worden geladen.");
+    }
+
+    char poort[6] = "";
+    if (instellingen.mqtt.poort != 0) {
+        snprintf(poort, sizeof(poort), "%u", (unsigned)instellingen.mqtt.poort);
+    }
+    const struct {
+        const char *naam;
+        const char *waarde;
+    } velden[] = {
+        {"ssid", instellingen.ssid},
+        {"wifi_wachtwoord", instellingen.wifi_wachtwoord},
+        {"mqtt_host", instellingen.mqtt.host},
+        {"mqtt_poort", poort},
+        {"mqtt_gebruikersnaam", instellingen.mqtt.gebruikersnaam},
+        {"mqtt_wachtwoord", instellingen.mqtt.wachtwoord},
+    };
+
+    cJSON *json = cJSON_CreateObject();
+    if (json == NULL) {
+        return antwoord(verzoek, "503 Service Unavailable", "Te weinig geheugen om de instellingen te laden.");
+    }
+    for (size_t i = 0; i < sizeof(velden) / sizeof(velden[0]); ++i) {
+        if (cJSON_AddStringToObject(json, velden[i].naam, velden[i].waarde) == NULL) {
+            cJSON_Delete(json);
+            return antwoord(verzoek, "503 Service Unavailable", "Te weinig geheugen om de instellingen te laden.");
+        }
+    }
+
+    char *inhoud = cJSON_PrintUnformatted(json);
+    cJSON_Delete(json);
+    if (inhoud == NULL) {
+        return antwoord(verzoek, "503 Service Unavailable", "Te weinig geheugen om de instellingen te laden.");
+    }
+    httpd_resp_set_type(verzoek, "application/json; charset=utf-8");
+    httpd_resp_set_hdr(verzoek, "Cache-Control", "no-store");
+    const esp_err_t verzonden = httpd_resp_sendstr(verzoek, inhoud);
+    cJSON_free(inhoud);
+    return verzonden;
+}
+
 static esp_err_t formulier_post(httpd_req_t *verzoek)
 {
     if (!lokaal_verzoek(verzoek)) {
@@ -219,10 +277,9 @@ static esp_err_t formulier_post(httpd_req_t *verzoek)
 
     s_bewaard = true;
     const esp_err_t verzonden = antwoord(verzoek, "200 OK",
-        "Instellingen opgeslagen. Het setupnetwerk sluit en de ESP32 probeert de gekozen wifi.\n\r"
-        "Verschijnt het setupnetwerk opnieuw, dan kan er geen verbinding met de gekozen wifi gemaakt worden.\n\r"
-        "open dan het formulier om de wifi-instellingen te corrigeren.");
-    xTaskNotifyGive((TaskHandle_t)verzoek->user_ctx);
+        "Instellingen opgeslagen. Het setupnetwerk sluit en de brouwketel probeert te verbinden met de gekozen WiFi.\r\n" 
+        "Verschijnt het setupnetwerk opnieuw, open dan het formulier om de WiFi-instellingen aan te passen.\r\n");
+    brouw_netwerk_configuratie_opgeslagen();
     return verzonden;
 }
 
@@ -240,10 +297,16 @@ esp_err_t brouw_portaal_start(TaskHandle_t netwerktaak, httpd_handle_t *server)
         return fout;
     }
     const httpd_uri_t get = { .uri = "/", .method = HTTP_GET, .handler = formulier_get };
+    const httpd_uri_t instellingen = {
+        .uri = "/instellingen", .method = HTTP_GET, .handler = instellingen_get,
+    };
     const httpd_uri_t post = {
         .uri = "/opslaan", .method = HTTP_POST, .handler = formulier_post, .user_ctx = netwerktaak,
     };
     fout = httpd_register_uri_handler(*server, &get);
+    if (fout == ESP_OK) {
+        fout = httpd_register_uri_handler(*server, &instellingen);
+    }
     if (fout == ESP_OK) {
         fout = httpd_register_uri_handler(*server, &post);
     }

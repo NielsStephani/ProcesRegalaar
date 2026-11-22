@@ -26,7 +26,7 @@
     legend { padding: 0; font-size: 1.125rem; font-weight: 700; }
     label { display: block; margin-top: .7rem; font-weight: 600; }
     input, button { font: inherit; }
-    input {
+    input:not([type="checkbox"]) {
       display: block;
       width: 100%;
       padding: .6rem .7rem;
@@ -34,7 +34,17 @@
       border: 1px solid #8b9c90;
       border-radius: .45rem;
     }
+    .wachtwoord_tonen {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      margin-top: .4rem;
+      font-weight: 400;
+      cursor: pointer;
+    }
+    .wachtwoord_tonen input { width: 1.1rem; height: 1.1rem; margin: 0; }
     small { color: #4b5d50; }
+    #formulier_status { margin: 0 0 1rem; }
     :focus-visible { outline: 3px solid #276a4a; outline-offset: 3px; }
     button {
       padding: .7rem 1rem;
@@ -46,36 +56,94 @@
       cursor: pointer;
     }
     button:hover { background: #184630; }
+    button:disabled { opacity: .6; cursor: wait; }
+    #opnieuw_laden { margin-top: 1rem; }
   </style>
 </head>
 <body>
   <main>
     <h1>Brouwketel instellen</h1>
-    <form method="post" action="/opslaan" accept-charset="UTF-8" autocomplete="off">
-      <fieldset>
+    <p id="formulier_status" role="status">Instellingen laden…</p>
+    <form id="instellingen_formulier" method="post" action="/opslaan" accept-charset="UTF-8" autocomplete="off">
+      <fieldset disabled>
         <legend>Wifi</legend>
         <label for="ssid">Netwerknaam (SSID)</label>
-        <input id="ssid" name="ssid" required maxlength="32" spellcheck="false" autocapitalize="none" aria-describedby="wifi_hulp">
+        <input id="ssid" name="ssid" required maxlength="32" spellcheck="false" autocapitalize="none">
         <label for="wifi_wachtwoord">Wifiwachtwoord</label>
         <input id="wifi_wachtwoord" name="wifi_wachtwoord" type="password" minlength="8" maxlength="63"
                aria-describedby="wifi_hulp">
+        <label class="wachtwoord_tonen">
+          <input id="toon_wifi_wachtwoord" type="checkbox" aria-controls="wifi_wachtwoord">
+          Wachtwoord tonen
+        </label>
       </fieldset>
-      <fieldset>
+      <fieldset aria-describedby="mqtt_hulp" disabled>
         <legend>MQTT</legend>
         <label for="mqtt_host">MQTT-host</label>
-        <input id="mqtt_host" name="mqtt_host" required maxlength="253"
-               spellcheck="false" autocapitalize="none" aria-describedby="mqtt_hulp">
+        <input id="mqtt_host" name="mqtt_host" maxlength="253"
+               spellcheck="false" autocapitalize="none" aria-describedby="broker_hulp">
+        <small id="broker_hulp">Een hostname of IPv4-adres.</small>
         <label for="mqtt_poort">MQTT-poort</label>
-        <input id="mqtt_poort" name="mqtt_poort" required inputmode="numeric" pattern="[0-9]{1,5}"
-               maxlength="5" placeholder="Bv. 1883" aria-describedby="poort_hulp">
+        <input id="mqtt_poort" name="mqtt_poort" inputmode="numeric" pattern="[0-9]{1,5}"
+               maxlength="5">
         <label for="mqtt_gebruikersnaam">MQTT-gebruikersnaam</label>
-        <input id="mqtt_gebruikersnaam" name="mqtt_gebruikersnaam" required maxlength="32" spellcheck="false" autocapitalize="none">
+        <input id="mqtt_gebruikersnaam" name="mqtt_gebruikersnaam" maxlength="32"
+               spellcheck="false" autocapitalize="none">
         <label for="mqtt_wachtwoord">MQTT-wachtwoord</label>
-        <input id="mqtt_wachtwoord" name="mqtt_wachtwoord" type="password" minlength="8" maxlength="63"
-               aria-describedby="mqtt_hulp">
+        <input id="mqtt_wachtwoord" name="mqtt_wachtwoord" type="password" maxlength="63">
+        <label class="wachtwoord_tonen">
+          <input id="toon_mqtt_wachtwoord" type="checkbox" aria-controls="mqtt_wachtwoord">
+          Wachtwoord tonen
+        </label>
       </fieldset>
-      <button type="submit">Opslaan en verbinden</button>
+      <button id="opslaan" type="submit" disabled>Opslaan en verbinden</button>
     </form>
+    <button id="opnieuw_laden" type="button" hidden>Opnieuw laden</button>
   </main>
+  <script>
+    const formulier = document.getElementById("instellingen_formulier");
+    const formulierStatus = document.getElementById("formulier_status");
+    const opslaan = document.getElementById("opslaan");
+    const opnieuwLaden = document.getElementById("opnieuw_laden");
+    const veldnamen = [
+      "ssid", "wifi_wachtwoord", "mqtt_host", "mqtt_poort",
+      "mqtt_gebruikersnaam", "mqtt_wachtwoord"
+    ];
+
+    for (const naam of ["wifi_wachtwoord", "mqtt_wachtwoord"]) {
+      const veld = document.getElementById(naam);
+      const checkbox = document.getElementById("toon_" + naam);
+      checkbox.addEventListener("change", () => {
+        veld.type = checkbox.checked ? "text" : "password";
+      });
+    }
+
+    async function instellingenLaden() {
+      formulierStatus.hidden = false;
+      formulierStatus.textContent = "Instellingen laden…";
+      opnieuwLaden.hidden = true;
+      try {
+        const antwoord = await fetch("/instellingen", { cache: "no-store" });
+        if (!antwoord.ok) {
+          throw new Error("Instellingen laden mislukt");
+        }
+        const gegevens = await antwoord.json();
+        for (const naam of veldnamen) {
+          document.getElementById(naam).value = gegevens[naam] ?? "";
+        }
+        for (const veldgroep of formulier.querySelectorAll("fieldset")) {
+          veldgroep.disabled = false;
+        }
+        opslaan.disabled = false;
+        formulierStatus.hidden = true;
+      } catch {
+        formulierStatus.textContent = "De instellingen konden niet worden geladen. Probeer opnieuw.";
+        opnieuwLaden.hidden = false;
+      }
+    }
+
+    opnieuwLaden.addEventListener("click", instellingenLaden);
+    instellingenLaden();
+  </script>
 </body>
 </html>

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include "brouw_netwerk.h"
 #include "esp_app_desc.h"
@@ -76,12 +77,18 @@ static char s_id[13];
 static char s_client_id[sizeof("brouwer-") + 12];
 static char s_topic[TOPIC_AANTAL][64];
 static char *s_info_json;
+static atomic_bool s_verbindingspoging_mislukt = false;
 
 /* Alleen de MQTT-eventtaak gebruikt deze variabelen terwijl de client draait. */
 static recept_buffer_t s_rx;
 static int s_sub_id;
 static int s_info_id;
 static int s_offline_id;
+
+bool brouw_mqtt_verbindingspoging_mislukt(void)
+{
+    return atomic_load(&s_verbindingspoging_mislukt);
+}
 
 static cJSON *voeg_benoemd_item_toe(cJSON *lijst, const char *naam)
 {
@@ -208,6 +215,7 @@ static void verzamel_recept(esp_mqtt_event_handle_t event)
 
 static void herstart_bij_fout(const char *melding)
 {
+    atomic_store(&s_verbindingspoging_mislukt, true);
     ESP_LOGW(TAG, "%s", melding);
     xEventGroupClearBits(s_events, MQTT_GEREED);
     xEventGroupSetBits(s_events, MQTT_HERSTART);
@@ -270,6 +278,7 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         break;
 
     case MQTT_EVENT_DISCONNECTED:
+        atomic_store(&s_verbindingspoging_mislukt, true);
         xEventGroupClearBits(s_events, MQTT_SESSIE | MQTT_GEREED);
         verwijder_onvolledig_recept();
         xEventGroupSetBits(s_events, MQTT_HERSTART);
@@ -277,6 +286,7 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         break;
 
     case MQTT_EVENT_ERROR:
+        atomic_store(&s_verbindingspoging_mislukt, true);
         if (event->error_handle == NULL) {
             break;
         }
@@ -432,6 +442,7 @@ static void mqtt_taak(void *arg)
         } else if (s_client == NULL) {
             const esp_err_t fout = start_client();
             if (fout != ESP_OK) {
+                atomic_store(&s_verbindingspoging_mislukt, true);
                 if (fout != vorige_fout) {
                     if (fout == ESP_ERR_NOT_FOUND) {
                         ESP_LOGW(TAG, "Geen MQTT-host ingesteld in het wifi-configuratieformulier.");
@@ -512,6 +523,7 @@ esp_err_t brouw_mqtt_start(void)
         return ESP_ERR_INVALID_STATE;
     }
     xSemaphoreTake(s_start_stop_mutex, portMAX_DELAY);
+    atomic_store(&s_verbindingspoging_mislukt, false);
     xEventGroupSetBits(s_events, MQTT_INGESCHAKELD);
     xSemaphoreGive(s_start_stop_mutex);
     return ESP_OK;
