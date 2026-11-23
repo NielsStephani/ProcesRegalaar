@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define BROUW_MQTT_RECEPT_MAX_BYTES 4096
+#define BROUW_MQTT_RECEPT_MAX_BYTES 8192   /* website stuurt mooi opgemaakte JSON met veel extra velden */
 
 typedef struct {
     const char *message_id;

@@ -23,6 +23,8 @@
 #define PUBLICATIE_MAX_BYTES 4096
 #define RECEPT_QOS 2
 #define SERVER_STATUS_TOPIC "brouwer/server/status"   /* retained online/offline van de webserver */
+/* De website stuurt het recept hierheen, zonder envelop (dus zonder message_id/data). */
+#define RECEPT_TOPIC "brouwer/server/cmd/recept"
 
 enum {
     MQTT_SESSIE = BIT0,
@@ -176,7 +178,7 @@ static void verzamel_recept(esp_mqtt_event_handle_t event)
 {
     if (event->current_data_offset == 0) {
         verwijder_onvolledig_recept();
-        const char *topic = s_topic[TOPIC_RECEPT];
+        const char *topic = RECEPT_TOPIC;
         if (event->retain || event->topic == NULL || event->topic_len != (int)strlen(topic) ||
             memcmp(event->topic, topic, (size_t)event->topic_len) != 0) {
             return;
@@ -237,7 +239,7 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (!stopt) {
             /* Retained status van de webserver: komt meteen binnen als hij er is. */
             esp_mqtt_client_subscribe_single(event->client, SERVER_STATUS_TOPIC, 1);
-            s_sub_id = esp_mqtt_client_subscribe_single(event->client, s_topic[TOPIC_RECEPT],
+            s_sub_id = esp_mqtt_client_subscribe_single(event->client, RECEPT_TOPIC,
                                                        TOPICS[TOPIC_RECEPT].qos);
             if (s_sub_id <= 0) {
                 herstart_bij_fout("Kan het MQTT-receptabonnement niet aanvragen.");
@@ -607,14 +609,32 @@ esp_err_t brouw_mqtt_ontvang_recept(brouw_mqtt_recept_t *recept, TickType_t wach
         json = cJSON_ParseWithLengthOpts(bericht.json, (size_t)bericht.lengte + 1, NULL, true);
     }
     free(bericht.json);
-    const cJSON *id = cJSON_GetObjectItemCaseSensitive(json, "message_id");
-    if (!cJSON_IsObject(json) || !cJSON_IsString(id) || id->valuestring[0] == '\0') {
-        ESP_LOGW(TAG, "Recept zonder bruikbare JSON-envelop of message_id.");
+    if (!cJSON_IsObject(json)) {
+        ESP_LOGW(TAG, "Recept is geen geldige JSON.");
         cJSON_Delete(json);
         return ESP_ERR_INVALID_RESPONSE;
     }
 
+    const cJSON *id = cJSON_GetObjectItemCaseSensitive(json, "message_id");
     const cJSON *data = cJSON_GetObjectItemCaseSensitive(json, "data");
+    if (!cJSON_IsString(id) || id->valuestring[0] == '\0') {
+        /* Recept zoals de website het stuurt: het hele bericht is het recept.
+         * We maken zelf een uniek nummer, zodat hetzelfde recept twee keer
+         * na elkaar sturen ook werkt. */
+        static uint32_t teller = 0;
+        char eigen_id[32];
+        const cJSON *recept_id = cJSON_GetObjectItemCaseSensitive(json, "id");
+        snprintf(eigen_id, sizeof(eigen_id), "recept-%d-%lu",
+                 cJSON_IsNumber(recept_id) ? recept_id->valueint : 0, (unsigned long)++teller);
+        cJSON_DeleteItemFromObjectCaseSensitive(json, "message_id");
+        id = cJSON_AddStringToObject(json, "message_id", eigen_id);
+        if (id == NULL) {
+            cJSON_Delete(json);
+            return ESP_ERR_NO_MEM;
+        }
+        data = json;
+        ESP_LOGI(TAG, "Recept van de website ontvangen (%s).", eigen_id);
+    }
     if (!cJSON_IsObject(data)) {
         const esp_err_t fout = brouw_mqtt_ack(id->valuestring, false, "data moet een JSON-object zijn");
         if (fout != ESP_OK) {
