@@ -3,6 +3,7 @@
 #include <math.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
@@ -13,6 +14,7 @@
 #include "brouw_netwerk.h"
 #include "brouw_mqtt.h"
 #include "esp_log.h"
+#include "recept.h"
 
 
 #define SPI_HOST    SPI2_HOST
@@ -30,6 +32,16 @@ int heating_power = 100; //Placeholder for heating power value, should be set ba
 
 static int last_message[8] = {0};
 static int next_index = 0;
+
+/* ---- Recept van de website ----
+ * Het scherm vraagt een recept met net/start. Daarna wacht de ketel tot iemand op
+ * de website op "Recept doorsturen" klikt. Dan komt het recept binnen op
+ * brouwer/<mac>/cmd/recept. Een recept dat binnenkomt terwijl het scherm niet
+ * wacht, wordt meteen geweigerd (ack ok:false), zodat er nooit een oud recept
+ * blijft hangen. */
+static volatile bool s_wacht_op_recept = false;   // true tussen net/start (verbonden) en het recept / net/stop
+static char s_recept_id[64] = "";                 // message_id van het recept dat nu bij het scherm ligt
+static char s_vorig_recept_id[64] = "";           // laatst verwerkte message_id (MQTT kan dubbel sturen)
 
 static bool net_toestand_versturen(bool wifi, bool mqtt, bool online, bool configuratie)
 {
@@ -273,6 +285,59 @@ void temp_task(void *parameters)
     }
 }
 
+/* Haalt recepten uit de wachtrij van brouw_mqtt. Wacht het scherm erop, dan
+ * omzetten en doorsturen; anders meteen weigeren. */
+static void recept_taak(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        brouw_mqtt_recept_t recept = {0};
+        const esp_err_t fout = brouw_mqtt_ontvang_recept(&recept, pdMS_TO_TICKS(500));
+        if (fout != ESP_OK) {
+            // ESP_ERR_TIMEOUT: niets binnen. Een ongeldig recept is al geweigerd.
+            if (fout == ESP_ERR_INVALID_STATE) {
+                vTaskDelay(pdMS_TO_TICKS(500));
+            }
+            continue;
+        }
+
+        // Hetzelfde recept nog eens (MQTT QoS kan dubbel leveren): negeren
+        if (strcmp(recept.message_id, s_vorig_recept_id) == 0) {
+            ESP_LOGI("recept", "Recept %s al verwerkt, genegeerd.", recept.message_id);
+            brouw_mqtt_recept_vrijgeven(&recept);
+            continue;
+        }
+        strlcpy(s_vorig_recept_id, recept.message_id, sizeof(s_vorig_recept_id));
+
+        if (!s_wacht_op_recept) {
+            ESP_LOGW("recept", "Recept %s geweigerd: het scherm wacht niet.", recept.message_id);
+            brouw_mqtt_ack(recept.message_id, false,
+                           "ketel wacht niet op een recept: druk eerst op Automatisch");
+            brouw_mqtt_recept_vrijgeven(&recept);
+            continue;
+        }
+
+        char *voor_scherm = NULL;
+        const char *reden = recept_omzetten(recept.data, &voor_scherm);
+        if (reden != NULL) {
+            ESP_LOGW("recept", "Recept %s ongeldig: %s", recept.message_id, reden);
+            brouw_mqtt_ack(recept.message_id, false, reden);
+            // Het scherm laten weten dat het mislukt is (vinkje 2 rood)
+            char json[160];
+            snprintf(json, sizeof(json), "{\"status\":\"fout\",\"reden\":\"%s\"}", reden);
+            scherm_uart_verstuur("net/status", json);
+        } else {
+            ESP_LOGI("recept", "Recept %s naar het scherm.", recept.message_id);
+            strlcpy(s_recept_id, recept.message_id, sizeof(s_recept_id));
+            scherm_uart_verstuur("recept", voor_scherm);   // ack volgt na recept_ok / recept_fout
+            free(voor_scherm);
+        }
+        s_wacht_op_recept = false;
+        brouw_mqtt_recept_vrijgeven(&recept);
+    }
+}
+
 static void bericht_verwerken(const scherm_uart_bericht_t *bericht)
 {
     const char* einde = NULL;
@@ -304,6 +369,21 @@ static void bericht_verwerken(const scherm_uart_bericht_t *bericht)
             {
                 printf("Nieuwe melding: %s\n", bericht->json);
                 //Dit JSON bericht doorgeven naar MQTT broker voor de server
+
+                // Antwoord van het scherm op het recept: doorgeven aan de website
+                const char *naam = cJSON_GetStringValue(
+                    cJSON_GetObjectItemCaseSensitive(data, "naam"));
+                if (naam != NULL && s_recept_id[0] != '\0' &&
+                    (strcmp(naam, "recept_ok") == 0 || strcmp(naam, "recept_fout") == 0))
+                {
+                    const bool ok = strcmp(naam, "recept_ok") == 0;
+                    const char *reden = cJSON_GetStringValue(
+                        cJSON_GetObjectItemCaseSensitive(data, "reden"));
+                    brouw_mqtt_ack(s_recept_id, ok,
+                                   ok ? NULL : (reden != NULL && reden[0] != '\0'
+                                                ? reden : "scherm weigert het recept"));
+                    s_recept_id[0] = '\0';
+                }
             }
         }
     }
@@ -339,13 +419,15 @@ static void bericht_verwerken(const scherm_uart_bericht_t *bericht)
         else
         {
             scherm_uart_verstuur("net/status", "{\"status\":\"verbonden\"}");
-            //Hier later: recept ophalen (brouw_mqtt_ontvang_recept) en als "recept" naar het scherm sturen
+            // Vanaf nu wachten op een recept van de website (recept_taak)
+            s_recept_id[0] = '\0';
+            s_wacht_op_recept = true;
         }
     }
     else if (strcmp(bericht->onderwerp, "net/stop") == 0)
     {
-        printf("Stop commando ontvangen.\n");
-        //Hier de stop van het brouwproces starten
+        printf("Stop commando ontvangen: niet meer wachten op een recept.\n");
+        s_wacht_op_recept = false;
     }
     else if (strcmp(bericht->onderwerp, "net/modus") == 0)
     {
@@ -438,6 +520,11 @@ void app_main(void)
     }
 
     ESP_ERROR_CHECK(brouw_mqtt_init("Brouwketel 1", true));
+
+    if (xTaskCreate(recept_taak, "recept", 1024 * 8, NULL, 5, NULL) != pdPASS)
+    {
+        ESP_LOGE("main", "Kan recepttaak niet starten");
+    }
 
     if (xTaskCreate(net_toestand_taak, "net_toestand", 1024 * 8, NULL, 5, NULL) != pdPASS) 
     {
