@@ -278,7 +278,7 @@ static esp_err_t formulier_post(httpd_req_t *verzoek)
     s_bewaard = true;
     const esp_err_t verzonden = antwoord(verzoek, "200 OK",
         "Instellingen opgeslagen. Het setupnetwerk sluit en de brouwketel probeert te verbinden met de gekozen WiFi.\r\n" 
-        "Verschijnt het setupnetwerk opnieuw, open dan het formulier om de WiFi-instellingen aan te passen.\r\n");
+        "Wanneer er geen verbinding gemaakt kan worden, schakel de configuratie-modus in op het display.\r\n");
     brouw_netwerk_configuratie_opgeslagen();
     return verzonden;
 }
