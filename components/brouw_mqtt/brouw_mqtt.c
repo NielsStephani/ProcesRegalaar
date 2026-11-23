@@ -22,6 +22,7 @@
 #define RECEPT_WACHTRIJ_LENGTE 3
 #define PUBLICATIE_MAX_BYTES 4096
 #define RECEPT_QOS 2
+#define SERVER_STATUS_TOPIC "brouwer/server/status"   /* retained online/offline van de webserver */
 
 enum {
     MQTT_SESSIE = BIT0,
@@ -78,6 +79,7 @@ static char s_client_id[sizeof("brouwer-") + 12];
 static char s_topic[TOPIC_AANTAL][64];
 static char *s_info_json;
 static atomic_bool s_verbindingspoging_mislukt = false;
+static atomic_bool s_server_online = false;
 
 /* Alleen de MQTT-eventtaak gebruikt deze variabelen terwijl de client draait. */
 static recept_buffer_t s_rx;
@@ -231,7 +233,10 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     switch (id) {
     case MQTT_EVENT_CONNECTED:
         xEventGroupSetBits(s_events, MQTT_SESSIE);
+        atomic_store(&s_server_online, false);
         if (!stopt) {
+            /* Retained status van de webserver: komt meteen binnen als hij er is. */
+            esp_mqtt_client_subscribe_single(event->client, SERVER_STATUS_TOPIC, 1);
             s_sub_id = esp_mqtt_client_subscribe_single(event->client, s_topic[TOPIC_RECEPT],
                                                        TOPICS[TOPIC_RECEPT].qos);
             if (s_sub_id <= 0) {
@@ -272,6 +277,15 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         break;
 
     case MQTT_EVENT_DATA:
+        if (event->topic != NULL &&
+            event->topic_len == (int)strlen(SERVER_STATUS_TOPIC) &&
+            memcmp(event->topic, SERVER_STATUS_TOPIC, (size_t)event->topic_len) == 0) {
+            const bool online = event->data != NULL && event->data_len == 6 &&
+                                memcmp(event->data, "online", 6) == 0;
+            atomic_store(&s_server_online, online);
+            ESP_LOGI(TAG, "Server is %s.", online ? "online" : "offline");
+            break;
+        }
         if (!stopt && (xEventGroupGetBits(s_events) & MQTT_GEREED) != 0) {
             verzamel_recept(event);
         }
@@ -279,6 +293,7 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 
     case MQTT_EVENT_DISCONNECTED:
         atomic_store(&s_verbindingspoging_mislukt, true);
+        atomic_store(&s_server_online, false);
         xEventGroupClearBits(s_events, MQTT_SESSIE | MQTT_GEREED);
         verwijder_onvolledig_recept();
         xEventGroupSetBits(s_events, MQTT_HERSTART);
@@ -534,6 +549,11 @@ bool brouw_mqtt_is_verbonden(void)
     return s_events != NULL &&
            (xEventGroupGetBits(s_events) & (MQTT_GEREED | STOP_GEVRAAGD)) == MQTT_GEREED &&
            brouw_netwerk_status() == BROUW_NETWERK_IP_GEREED;
+}
+
+bool brouw_mqtt_server_online(void)
+{
+    return brouw_mqtt_is_verbonden() && atomic_load(&s_server_online);
 }
 
 esp_err_t brouw_mqtt_publiceer(const char *topic, const char *payload)

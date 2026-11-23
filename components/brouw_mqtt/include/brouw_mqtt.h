@@ -22,6 +22,8 @@ typedef struct {
 esp_err_t brouw_mqtt_init(const char *ketelnaam, bool automatisch_starten);
 esp_err_t brouw_mqtt_start(void);
 bool brouw_mqtt_is_verbonden(void);
+/* true als MQTT verbonden is en de webserver retained "online" zette op brouwer/server/status */
+bool brouw_mqtt_server_online(void);
 esp_err_t brouw_mqtt_publiceer(const char *topic, const char *payload);
 esp_err_t brouw_mqtt_ontvang_recept(brouw_mqtt_recept_t *recept, TickType_t wachttijd);
 void brouw_mqtt_recept_vrijgeven(brouw_mqtt_recept_t *recept);

@@ -31,7 +31,7 @@ int heating_power = 100; //Placeholder for heating power value, should be set ba
 static int last_message[8] = {0};
 static int next_index = 0;
 
-static bool net_toestand_versturen(bool wifi, bool mqtt, bool configuratie)
+static bool net_toestand_versturen(bool wifi, bool mqtt, bool online, bool configuratie)
 {
     char ssid[33] = "";
     brouw_netwerk_lees_ssid(ssid);
@@ -39,14 +39,16 @@ static bool net_toestand_versturen(bool wifi, bool mqtt, bool configuratie)
     brouw_netwerk_mqtt_t broker = {0};
     brouw_netwerk_lees_mqtt(&broker);
 
-    // Zonder wifi kan MQTT niet verbonden zijn.
+    // Zonder wifi geen MQTT, zonder MQTT geen server.
     mqtt = wifi && mqtt;
+    online = mqtt && online;
 
     cJSON *json = cJSON_CreateObject();
 
     if (json == NULL ||
         cJSON_AddBoolToObject(json, "wifi", wifi) == NULL ||
         cJSON_AddBoolToObject(json, "mqtt", mqtt) == NULL ||
+        cJSON_AddBoolToObject(json, "online", online) == NULL ||
         cJSON_AddStringToObject(json, "modus",
                                 configuratie ? "configuratie" : "werking") == NULL ||
         cJSON_AddStringToObject(json, "ssid", ssid) == NULL ||
@@ -80,6 +82,7 @@ static void net_toestand_taak(void *arg)
     bool vorige_geldig = false;
     bool vorige_wifi = false;
     bool vorige_mqtt = false;
+    bool vorige_online = false;
     bool vorige_configuratie = false;
 
     for (;;) {
@@ -147,19 +150,25 @@ static void net_toestand_taak(void *arg)
             const bool mqtt =
                 wifi && brouw_mqtt_is_verbonden();
 
+            // Server online: retained "online" op brouwer/server/status
+            const bool online =
+                mqtt && brouw_mqtt_server_online();
+
             const bool configuratie =
                 toestand == BROUW_NETWERK_SETUP;
 
             if (forceer || !vorige_geldig ||
                 wifi != vorige_wifi ||
                 mqtt != vorige_mqtt ||
+                online != vorige_online ||
                 configuratie != vorige_configuratie) {
 
                 if (net_toestand_versturen(
-                        wifi, mqtt, configuratie)) {
+                        wifi, mqtt, online, configuratie)) {
 
                     vorige_wifi = wifi;
                     vorige_mqtt = mqtt;
+                    vorige_online = online;
                     vorige_configuratie = configuratie;
                     vorige_geldig = true;
                     forceer = false;
@@ -312,35 +321,26 @@ static void bericht_verwerken(const scherm_uart_bericht_t *bericht)
         //Hier de doeltemperatuur en pomptoestand doorgeven aan de PID-regelaar en sturing pomp
         //Ontbrekende kp/ki/kd moeten daar hun vorige waarde behouden
     }
-     else if (strcmp(bericht->onderwerp, "brouw/status") == 0)
+    else if (strcmp(bericht->onderwerp, "brouw/status") == 0)
     {
-        cJSON* server = cJSON_GetObjectItemCaseSensitive(data, "server");
-        cJSON* poort = cJSON_GetObjectItemCaseSensitive(data, "poort");
-
-        char* server_IP = cJSON_IsString(server) ? server->valuestring : "onbekend";
-        int poort_nummer = cJSON_IsNumber(poort) ? (int)poort->valuedouble : 0;
-
-        printf("Server: %s, Poort: %d\n", server_IP, poort_nummer);
-
-        char json[100];
-        snprintf(json, sizeof(json), "{\"status\":\"verbonden\"}");
-        scherm_uart_verstuur("net/status", json);
+        // Alleen voor de website: later doorsturen naar MQTT. Niets terugsturen naar het scherm.
     }
     else if (strcmp(bericht->onderwerp, "net/start") == 0)
     {
-        cJSON* server = cJSON_GetObjectItemCaseSensitive(data, "server");
-        cJSON* poort = cJSON_GetObjectItemCaseSensitive(data, "poort");
-
-        char* server_IP = cJSON_IsString(server) ? server->valuestring : "onbekend";
-        int poort_nummer = cJSON_IsNumber(poort) ? (int)poort->valuedouble : 0;
-
-        printf("Server: %s, Poort: %d\n", server_IP, poort_nummer);
-
-        vTaskDelay(pdMS_TO_TICKS(1000));
-
-        char json[100];
-        snprintf(json, sizeof(json), "{\"status\":\"verbonden\"}");
-        scherm_uart_verstuur("net/status", json);
+        // Echt controleren: MQTT verbonden en de server online (brouwer/server/status).
+        if (!brouw_mqtt_is_verbonden())
+        {
+            scherm_uart_verstuur("net/status", "{\"status\":\"fout\",\"reden\":\"geen MQTT\"}");
+        }
+        else if (!brouw_mqtt_server_online())
+        {
+            scherm_uart_verstuur("net/status", "{\"status\":\"fout\",\"reden\":\"server offline\"}");
+        }
+        else
+        {
+            scherm_uart_verstuur("net/status", "{\"status\":\"verbonden\"}");
+            //Hier later: recept ophalen (brouw_mqtt_ontvang_recept) en als "recept" naar het scherm sturen
+        }
     }
     else if (strcmp(bericht->onderwerp, "net/stop") == 0)
     {
