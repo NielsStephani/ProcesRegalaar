@@ -37,12 +37,7 @@ static bool net_toestand_versturen(bool wifi, bool mqtt, bool configuratie)
     brouw_netwerk_lees_ssid(ssid);
 
     brouw_netwerk_mqtt_t broker = {0};
-    char poort[6] = "";
-
-    if (brouw_netwerk_lees_mqtt(&broker) == ESP_OK) {
-        snprintf(poort, sizeof(poort), "%u",
-                 (unsigned)broker.poort);
-    }
+    brouw_netwerk_lees_mqtt(&broker);
 
     // Zonder wifi kan MQTT niet verbonden zijn.
     mqtt = wifi && mqtt;
@@ -50,16 +45,13 @@ static bool net_toestand_versturen(bool wifi, bool mqtt, bool configuratie)
     cJSON *json = cJSON_CreateObject();
 
     if (json == NULL ||
-        cJSON_AddStringToObject(json, "wifi",
-                                wifi ? "true" : "false") == NULL ||
-        cJSON_AddStringToObject(json, "mqtt",
-                                mqtt ? "true" : "false") == NULL ||
+        cJSON_AddBoolToObject(json, "wifi", wifi) == NULL ||
+        cJSON_AddBoolToObject(json, "mqtt", mqtt) == NULL ||
         cJSON_AddStringToObject(json, "modus",
-                                configuratie
-                                ? "configuratie" : "werking") == NULL ||
+                                configuratie ? "configuratie" : "werking") == NULL ||
         cJSON_AddStringToObject(json, "ssid", ssid) == NULL ||
         cJSON_AddStringToObject(json, "server", broker.host) == NULL ||
-        cJSON_AddStringToObject(json, "poort", poort) == NULL) {
+        cJSON_AddNumberToObject(json, "poort", broker.poort) == NULL) {
         cJSON_Delete(json);
         return false;
     }
@@ -82,8 +74,8 @@ static void net_toestand_taak(void *arg)
     (void)arg;
 
     uint32_t afgehandeld = 0;
-    bool bewaken = false;
-    bool forceer = false;
+    bool bewaken = true;
+    bool forceer = true;
 
     bool vorige_geldig = false;
     bool vorige_wifi = false;
@@ -230,26 +222,42 @@ void temp_task(void *parameters)
     while (1)
     {
         float temperature_c = 0.0f;
-        esp_err_t err = max31865_read_temperature(&sensor, &temperature_c);
+        esp_err_t meting = max31865_read_temperature(&sensor, &temperature_c);
+        bool ok = (meting == ESP_OK && isfinite(temperature_c));
 
+        // 1. Naar het scherm (zoals voorheen)
         char json[100];
-        if (err == ESP_OK && isfinite(temperature_c))
+        if (ok)
         {
-            int vermogen = heating_power; //heating_power wordt later bepaald door PID-regelaar
-            snprintf(json, sizeof(json), "{\"temp\":%.1f,\"ok\":true,\"vermogen\":%d}", 
-            temperature_c, heating_power);
+            snprintf(json, sizeof(json), "{\"temp\":%.1f,\"ok\":true,\"vermogen\":%d}",
+                     temperature_c, heating_power);
             printf("Temperatuur: %.2f °C\n", temperature_c);
         }
         else
         {
-            snprintf(json, sizeof(json),"{\"temp\":null,\"ok\":false,\"vermogen\":%d}", heating_power);
-            printf("Uitlezen mislukt: %s\n", esp_err_to_name(err));
+            snprintf(json, sizeof(json), "{\"temp\":null,\"ok\":false,\"vermogen\":%d}", heating_power);
+            printf("Uitlezen mislukt: %s\n", esp_err_to_name(meting));
         }
 
         err = scherm_uart_verstuur("ketel/temp", json);
         if (err != ESP_OK)
         {
             printf("Temperatuur versturen mislukt: %s\n", esp_err_to_name(err));
+        }
+
+        // 2. Naar MQTT (nieuw), alleen als MQTT verbonden is
+        if (brouw_mqtt_is_verbonden())
+        {
+            char tekst[16];
+
+            if (ok)
+            {
+                snprintf(tekst, sizeof(tekst), "%.1f", temperature_c);
+                brouw_mqtt_publiceer("sensor/temperatuur", tekst);
+            }
+
+            snprintf(tekst, sizeof(tekst), "%d", heating_power);
+            brouw_mqtt_publiceer("actuator/verwarming/state", tekst);
         }
 
         vTaskDelay(pdMS_TO_TICKS(1000));
