@@ -23,8 +23,9 @@
 #define PUBLICATIE_MAX_BYTES 4096
 #define RECEPT_QOS 2
 #define SERVER_STATUS_TOPIC "brouwer/server/status"   /* retained online/offline van de webserver */
-/* De website stuurt het recept hierheen, zonder envelop (dus zonder message_id/data). */
-#define RECEPT_TOPIC "brouwer/server/cmd/recept"
+/* Recepten komen op brouwer/<mac>/cmd/recept (met envelop message_id/data)
+ * of op brouwer/server/cmd/recept (soms zonder envelop). We luisteren op beide. */
+#define RECEPT_TOPIC_SERVER "brouwer/server/cmd/recept"
 
 enum {
     MQTT_SESSIE = BIT0,
@@ -174,13 +175,18 @@ static void verwijder_onvolledig_recept(void)
     s_rx = (recept_buffer_t){0};
 }
 
+static bool topic_is(esp_mqtt_event_handle_t event, const char *topic)
+{
+    return event->topic_len == (int)strlen(topic) &&
+           memcmp(event->topic, topic, (size_t)event->topic_len) == 0;
+}
+
 static void verzamel_recept(esp_mqtt_event_handle_t event)
 {
     if (event->current_data_offset == 0) {
         verwijder_onvolledig_recept();
-        const char *topic = RECEPT_TOPIC;
-        if (event->retain || event->topic == NULL || event->topic_len != (int)strlen(topic) ||
-            memcmp(event->topic, topic, (size_t)event->topic_len) != 0) {
+        if (event->retain || event->topic == NULL ||
+            (!topic_is(event, s_topic[TOPIC_RECEPT]) && !topic_is(event, RECEPT_TOPIC_SERVER))) {
             return;
         }
         if (event->total_data_len <= 0 || event->total_data_len > BROUW_MQTT_RECEPT_MAX_BYTES) {
@@ -239,7 +245,9 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (!stopt) {
             /* Retained status van de webserver: komt meteen binnen als hij er is. */
             esp_mqtt_client_subscribe_single(event->client, SERVER_STATUS_TOPIC, 1);
-            s_sub_id = esp_mqtt_client_subscribe_single(event->client, RECEPT_TOPIC,
+            esp_mqtt_client_subscribe_single(event->client, RECEPT_TOPIC_SERVER,
+                                             TOPICS[TOPIC_RECEPT].qos);
+            s_sub_id = esp_mqtt_client_subscribe_single(event->client, s_topic[TOPIC_RECEPT],
                                                        TOPICS[TOPIC_RECEPT].qos);
             if (s_sub_id <= 0) {
                 herstart_bij_fout("Kan het MQTT-receptabonnement niet aanvragen.");
