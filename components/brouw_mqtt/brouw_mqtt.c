@@ -26,6 +26,8 @@
 /* Recepten komen op brouwer/<mac>/cmd/recept (met envelop message_id/data)
  * of op brouwer/server/cmd/recept (soms zonder envelop). We luisteren op beide. */
 #define RECEPT_TOPIC_SERVER "brouwer/server/cmd/recept"
+#define START_TOPIC_SERVER "brouwer/server/cmd/start"
+#define OPDRACHT_WACHTRIJ_LENGTE 4
 
 enum {
     MQTT_SESSIE = BIT0,
@@ -42,11 +44,14 @@ typedef enum {
     TOPIC_INFO,
     TOPIC_STATUS,
     TOPIC_RECEPT,
+    TOPIC_START,
     TOPIC_TEMPERATUUR,
     TOPIC_POMP,
     TOPIC_VERWARMING,
     TOPIC_ACK,
     TOPIC_FOUT,
+    TOPIC_BROUW_STATUS,
+    TOPIC_BROUW_MELDING,
     TOPIC_AANTAL,
 } topic_t;
 
@@ -58,11 +63,14 @@ static const struct {
     [TOPIC_INFO]        = { "info",                        1, true  },
     [TOPIC_STATUS]      = { "status",                      1, true  },
     [TOPIC_RECEPT]      = { "cmd/recept",                  RECEPT_QOS, false },
+    [TOPIC_START]       = { "cmd/start",                   1, false },
     [TOPIC_TEMPERATUUR] = { "sensor/temperatuur",          0, false },
     [TOPIC_POMP]        = { "actuator/pomp/state",         1, true  },
     [TOPIC_VERWARMING]  = { "actuator/verwarming/state",   1, true  },
     [TOPIC_ACK]         = { "ack",                         1, false },
     [TOPIC_FOUT]        = { "fout",                        1, false },
+    [TOPIC_BROUW_STATUS]  = { "brouw/status",              0, true  },   /* elke seconde van het scherm */
+    [TOPIC_BROUW_MELDING] = { "brouw/melding",             1, false },   /* gebeurtenis: start, pauze, ... */
 };
 
 typedef struct {
@@ -74,6 +82,7 @@ typedef struct {
 static const char *TAG = "brouw_mqtt";
 static EventGroupHandle_t s_events;
 static QueueHandle_t s_recepten;
+static QueueHandle_t s_opdrachten;
 static SemaphoreHandle_t s_client_mutex;
 static SemaphoreHandle_t s_start_stop_mutex;
 static esp_mqtt_client_handle_t s_client;
@@ -138,7 +147,7 @@ static char *maak_info_json(const char *ketelnaam)
     cJSON *verwarming = voeg_benoemd_item_toe(actuatoren, "verwarming");
     if (temperatuur == NULL || pomp == NULL || verwarming == NULL ||
         cJSON_AddStringToObject(temperatuur, "unit", "°C") == NULL ||
-        !voeg_waarde_toe(opdrachten, "recept")) {
+        !voeg_waarde_toe(opdrachten, "recept") || !voeg_waarde_toe(opdrachten, "start")) {
         goto klaar;
     }
 
@@ -223,6 +232,34 @@ static void verzamel_recept(esp_mqtt_event_handle_t event)
     }
 }
 
+/* cmd/start: klein bericht {"message_id":"...","data":{}}. Zonder message_id
+ * maken we er zelf een, zodat er toch een ack terug kan. */
+static void opdracht_ontvangen(esp_mqtt_event_handle_t event, const char *naam)
+{
+    if (event->retain || event->current_data_offset != 0 || event->data_len != event->total_data_len) {
+        return;
+    }
+    brouw_mqtt_opdracht_t opdracht = {0};
+    strlcpy(opdracht.naam, naam, sizeof(opdracht.naam));
+
+    cJSON *json = (event->data != NULL && event->data_len > 0)
+                      ? cJSON_ParseWithLength(event->data, (size_t)event->data_len) : NULL;
+    const char *id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "message_id"));
+    if (id != NULL && id[0] != '\0') {
+        strlcpy(opdracht.message_id, id, sizeof(opdracht.message_id));
+    } else {
+        static uint32_t teller = 0;
+        snprintf(opdracht.message_id, sizeof(opdracht.message_id), "%s-%lu", naam,
+                 (unsigned long)++teller);
+    }
+    cJSON_Delete(json);
+
+    ESP_LOGI(TAG, "Opdracht %s ontvangen (%s).", opdracht.naam, opdracht.message_id);
+    if (xQueueSend(s_opdrachten, &opdracht, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "Opdrachtwachtrij vol.");
+    }
+}
+
 static void herstart_bij_fout(const char *melding)
 {
     atomic_store(&s_verbindingspoging_mislukt, true);
@@ -247,6 +284,10 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             esp_mqtt_client_subscribe_single(event->client, SERVER_STATUS_TOPIC, 1);
             esp_mqtt_client_subscribe_single(event->client, RECEPT_TOPIC_SERVER,
                                              TOPICS[TOPIC_RECEPT].qos);
+            esp_mqtt_client_subscribe_single(event->client, s_topic[TOPIC_START],
+                                             TOPICS[TOPIC_START].qos);
+            esp_mqtt_client_subscribe_single(event->client, START_TOPIC_SERVER,
+                                             TOPICS[TOPIC_START].qos);
             s_sub_id = esp_mqtt_client_subscribe_single(event->client, s_topic[TOPIC_RECEPT],
                                                        TOPICS[TOPIC_RECEPT].qos);
             if (s_sub_id <= 0) {
@@ -294,6 +335,13 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
                                 memcmp(event->data, "online", 6) == 0;
             atomic_store(&s_server_online, online);
             ESP_LOGI(TAG, "Server is %s.", online ? "online" : "offline");
+            break;
+        }
+        if (event->topic != NULL &&
+            (topic_is(event, s_topic[TOPIC_START]) || topic_is(event, START_TOPIC_SERVER))) {
+            if (!stopt && (xEventGroupGetBits(s_events) & MQTT_GEREED) != 0) {
+                opdracht_ontvangen(event, "start");
+            }
             break;
         }
         if (!stopt && (xEventGroupGetBits(s_events) & MQTT_GEREED) != 0) {
@@ -509,9 +557,10 @@ esp_err_t brouw_mqtt_init(const char *ketelnaam, bool automatisch_starten)
     s_info_json = maak_info_json(ketelnaam);
     s_events = xEventGroupCreate();
     s_recepten = xQueueCreate(RECEPT_WACHTRIJ_LENGTE, sizeof(recept_buffer_t));
+    s_opdrachten = xQueueCreate(OPDRACHT_WACHTRIJ_LENGTE, sizeof(brouw_mqtt_opdracht_t));
     s_client_mutex = xSemaphoreCreateMutex();
     s_start_stop_mutex = xSemaphoreCreateMutex();
-    if (s_info_json != NULL && s_events != NULL && s_recepten != NULL &&
+    if (s_info_json != NULL && s_events != NULL && s_recepten != NULL && s_opdrachten != NULL &&
         s_client_mutex != NULL && s_start_stop_mutex != NULL) {
         if (automatisch_starten) {
             xEventGroupSetBits(s_events, MQTT_INGESCHAKELD);
@@ -528,6 +577,9 @@ esp_err_t brouw_mqtt_init(const char *ketelnaam, bool automatisch_starten)
     if (s_recepten != NULL) {
         vQueueDelete(s_recepten);
     }
+    if (s_opdrachten != NULL) {
+        vQueueDelete(s_opdrachten);
+    }
     if (s_client_mutex != NULL) {
         vSemaphoreDelete(s_client_mutex);
     }
@@ -537,6 +589,7 @@ esp_err_t brouw_mqtt_init(const char *ketelnaam, bool automatisch_starten)
     s_info_json = NULL;
     s_events = NULL;
     s_recepten = NULL;
+    s_opdrachten = NULL;
     s_client_mutex = NULL;
     s_start_stop_mutex = NULL;
     return ESP_ERR_NO_MEM;
@@ -589,7 +642,12 @@ esp_err_t brouw_mqtt_publiceer(const char *topic, const char *payload)
     xSemaphoreTake(s_client_mutex, portMAX_DELAY);
     esp_err_t fout = ESP_ERR_INVALID_STATE;
     if (s_client != NULL && brouw_mqtt_is_verbonden()) {
-        const int bericht_id = voeg_publicatie_toe(s_client, index, payload);
+        /* Meteen versturen. Met enqueue gaat er maar ongeveer een bericht per
+         * seconde de deur uit (de MQTT-taak verstuurt er een per ronde en wacht
+         * tot 1 s per ronde). Met status, temperatuur en verwarming elke seconde
+         * liep de wachtrij dan steeds verder achter. */
+        const int bericht_id = esp_mqtt_client_publish(s_client, s_topic[index], payload, 0,
+                                                       TOPICS[index].qos, TOPICS[index].retained);
         fout = bericht_id >= 0 ? ESP_OK : ESP_FAIL;
         if (bericht_id == -2) {
             fout = ESP_ERR_NO_MEM;
@@ -654,6 +712,17 @@ esp_err_t brouw_mqtt_ontvang_recept(brouw_mqtt_recept_t *recept, TickType_t wach
 
     *recept = (brouw_mqtt_recept_t){ .message_id = id->valuestring, .data = data, .json = json };
     return ESP_OK;
+}
+
+esp_err_t brouw_mqtt_ontvang_opdracht(brouw_mqtt_opdracht_t *opdracht, TickType_t wachttijd)
+{
+    if (opdracht == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_opdrachten == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return xQueueReceive(s_opdrachten, opdracht, wachttijd) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 void brouw_mqtt_recept_vrijgeven(brouw_mqtt_recept_t *recept)

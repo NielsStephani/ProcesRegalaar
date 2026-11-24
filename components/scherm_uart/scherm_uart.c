@@ -34,7 +34,7 @@ static bool onderwerp_versturen_bekend(const char *onderwerp)
     return strcmp(onderwerp, "ketel/temp") == 0 ||
            strcmp(onderwerp, "net/status") == 0 ||
            strcmp(onderwerp, "net/toestand") == 0 ||
-           strcmp(onderwerp, "recept") == 0 ||
+           strcmp(onderwerp, "recept") == 0 || strcmp(onderwerp, "brouw/start") == 0 ||
            strcmp(onderwerp, "ack") == 0;
 }
 

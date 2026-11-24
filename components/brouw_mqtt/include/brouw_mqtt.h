@@ -19,6 +19,12 @@ typedef struct {
     cJSON *json;  /* Eigenaar van message_id en data. Vrijgeven via de functie hieronder. */
 } brouw_mqtt_recept_t;
 
+/* Een korte opdracht van de website, bv. cmd/start. */
+typedef struct {
+    char naam[16];         /* "start" */
+    char message_id[64];   /* uit het bericht, of zelf gemaakt als het ontbreekt */
+} brouw_mqtt_opdracht_t;
+
 esp_err_t brouw_mqtt_init(const char *ketelnaam, bool automatisch_starten);
 esp_err_t brouw_mqtt_start(void);
 bool brouw_mqtt_is_verbonden(void);
@@ -27,6 +33,7 @@ bool brouw_mqtt_server_online(void);
 esp_err_t brouw_mqtt_publiceer(const char *topic, const char *payload);
 esp_err_t brouw_mqtt_ontvang_recept(brouw_mqtt_recept_t *recept, TickType_t wachttijd);
 void brouw_mqtt_recept_vrijgeven(brouw_mqtt_recept_t *recept);
+esp_err_t brouw_mqtt_ontvang_opdracht(brouw_mqtt_opdracht_t *opdracht, TickType_t wachttijd);
 esp_err_t brouw_mqtt_ack(const char *message_id, bool ok, const char *fout);
 esp_err_t brouw_mqtt_stop(void);
 bool brouw_mqtt_verbindingspoging_mislukt(void);

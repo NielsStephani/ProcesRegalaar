@@ -15,6 +15,8 @@
 #include "brouw_mqtt.h"
 #include "esp_log.h"
 #include "recept.h"
+#include "sdkconfig.h"
+#include "freertos/portmacro.h"
 
 
 #define SPI_HOST    SPI2_HOST
@@ -42,6 +44,27 @@ static int next_index = 0;
 static volatile bool s_wacht_op_recept = false;   // true tussen net/start (verbonden) en het recept / net/stop
 static char s_recept_id[64] = "";                 // message_id van het recept dat nu bij het scherm ligt
 static char s_vorig_recept_id[64] = "";           // laatst verwerkte message_id (MQTT kan dubbel sturen)
+
+/* ---- Brouwsessie starten vanaf de website ----
+ * cmd/start komt binnen -> brouw/start naar het scherm -> het scherm antwoordt
+ * met de melding "start" of "start_fout" -> ack naar de website. */
+#define START_ANTWOORD_MS 5000
+static char s_start_id[64] = "";                  // message_id van cmd/start dat op het scherm wacht
+static TickType_t s_start_tijd = 0;
+static portMUX_TYPE s_start_slot = portMUX_INITIALIZER_UNLOCKED;
+
+// Laatste wensen van het scherm (uit brouw/stuur)
+static volatile float s_doel = 0.0f;              // doeltemperatuur, 0 = verwarming uit
+static int s_pomp_gemeld = -1;                    // wat er laatst op actuator/pomp/state stond (-1 = nog niets)
+
+/* Neemt het wachtende start-id weg (leeg als er geen is). */
+static void start_id_nemen(char *id, size_t grootte)
+{
+    taskENTER_CRITICAL(&s_start_slot);
+    strlcpy(id, s_start_id, grootte);
+    s_start_id[0] = '\0';
+    taskEXIT_CRITICAL(&s_start_slot);
+}
 
 static bool net_toestand_versturen(bool wifi, bool mqtt, bool online, bool configuratie)
 {
@@ -233,17 +256,40 @@ esp_err_t spi_init(void)
 
 void temp_task(void *parameters)
 {
-    esp_err_t err = spi_init();
+    esp_err_t err;
+#if CONFIG_BROUW_NEP_TEMPERATUUR
+    // Thuis testen zonder PT100: geen sensor uitlezen, zie nep_meting hieronder
+    float nep_temp = 20.0f;
+    printf("LET OP: nep-temperatuur staat aan (menuconfig > Brouwketel)\n");
+#else
+    err = spi_init();
     if (err != ESP_OK)
     {
         printf("Failed to initialize SPI: %s\n", esp_err_to_name(err));
         vTaskDelete(NULL);
     }
+#endif
 
     while (1)
     {
         float temperature_c = 0.0f;
+#if CONFIG_BROUW_NEP_TEMPERATUUR
+        // Kouder dan het doel: verwarming vol aan, 1 graad per seconde erbij.
+        // Anders verwarming uit en langzaam afkoelen (niet onder 20, niet boven 100).
+        const float doel = s_doel;
+        if (doel > 0.0f && nep_temp < doel) {
+            heating_power = 100;
+            nep_temp += 1.0f;
+        } else {
+            heating_power = 0;
+            nep_temp -= 0.1f;
+        }
+        nep_temp = fminf(fmaxf(nep_temp, 20.0f), 100.0f);
+        temperature_c = nep_temp;
+        esp_err_t meting = ESP_OK;
+#else
         esp_err_t meting = max31865_read_temperature(&sensor, &temperature_c);
+#endif
         bool ok = (meting == ESP_OK && isfinite(temperature_c));
 
         // 1. Naar het scherm (zoals voorheen)
@@ -338,6 +384,58 @@ static void recept_taak(void *arg)
     }
 }
 
+/* Haalt opdrachten (cmd/start) uit de wachtrij van brouw_mqtt en geeft ze door
+ * aan het scherm. Antwoordt het scherm niet op tijd, dan een negatieve ack. */
+static void opdracht_taak(void *arg)
+{
+    (void)arg;
+    char vorig_id[64] = "";
+
+    for (;;) {
+        brouw_mqtt_opdracht_t opdracht;
+        if (brouw_mqtt_ontvang_opdracht(&opdracht, pdMS_TO_TICKS(200)) == ESP_OK &&
+            strcmp(opdracht.naam, "start") == 0) {
+
+            if (strcmp(opdracht.message_id, vorig_id) == 0) {
+                // MQTT QoS 1 kan hetzelfde bericht twee keer leveren
+                ESP_LOGI("start", "Startopdracht %s al verwerkt, genegeerd.", opdracht.message_id);
+            } else {
+                strlcpy(vorig_id, opdracht.message_id, sizeof(vorig_id));
+
+                bool bezig;
+                taskENTER_CRITICAL(&s_start_slot);
+                bezig = s_start_id[0] != '\0';
+                if (!bezig) {
+                    strlcpy(s_start_id, opdracht.message_id, sizeof(s_start_id));
+                    s_start_tijd = xTaskGetTickCount();
+                }
+                taskEXIT_CRITICAL(&s_start_slot);
+
+                if (bezig) {
+                    brouw_mqtt_ack(opdracht.message_id, false, "er wacht al een startopdracht op het scherm");
+                } else {
+                    ESP_LOGI("start", "Startopdracht %s naar het scherm.", opdracht.message_id);
+                    scherm_uart_verstuur("brouw/start", "{}");
+                }
+            }
+        }
+
+        // Geen antwoord van het scherm binnen 5 s?
+        char id[64] = "";
+        taskENTER_CRITICAL(&s_start_slot);
+        if (s_start_id[0] != '\0' &&
+            xTaskGetTickCount() - s_start_tijd > pdMS_TO_TICKS(START_ANTWOORD_MS)) {
+            strlcpy(id, s_start_id, sizeof(id));
+            s_start_id[0] = '\0';
+        }
+        taskEXIT_CRITICAL(&s_start_slot);
+        if (id[0] != '\0') {
+            ESP_LOGW("start", "Scherm antwoordt niet op startopdracht %s.", id);
+            brouw_mqtt_ack(id, false, "scherm antwoordt niet");
+        }
+    }
+}
+
 static void bericht_verwerken(const scherm_uart_bericht_t *bericht)
 {
     const char* einde = NULL;
@@ -368,7 +466,11 @@ static void bericht_verwerken(const scherm_uart_bericht_t *bericht)
             if (message_is_new(nr))
             {
                 printf("Nieuwe melding: %s\n", bericht->json);
-                //Dit JSON bericht doorgeven naar MQTT broker voor de server
+                // Doorgeven aan de website
+                if (brouw_mqtt_is_verbonden())
+                {
+                    brouw_mqtt_publiceer("brouw/melding", bericht->json);
+                }
 
                 // Antwoord van het scherm op het recept: doorgeven aan de website
                 const char *naam = cJSON_GetStringValue(
@@ -384,6 +486,23 @@ static void bericht_verwerken(const scherm_uart_bericht_t *bericht)
                                                 ? reden : "scherm weigert het recept"));
                     s_recept_id[0] = '\0';
                 }
+
+                // Antwoord van het scherm op cmd/start van de website
+                if (naam != NULL &&
+                    (strcmp(naam, "start") == 0 || strcmp(naam, "start_fout") == 0))
+                {
+                    char id[64];
+                    start_id_nemen(id, sizeof(id));
+                    if (id[0] != '\0')
+                    {
+                        const bool ok = strcmp(naam, "start") == 0;
+                        const char *reden = cJSON_GetStringValue(
+                            cJSON_GetObjectItemCaseSensitive(data, "reden"));
+                        brouw_mqtt_ack(id, ok,
+                                       ok ? NULL : (reden != NULL && reden[0] != '\0'
+                                                    ? reden : "scherm kan niet starten"));
+                    }
+                }
             }
         }
     }
@@ -397,13 +516,25 @@ static void bericht_verwerken(const scherm_uart_bericht_t *bericht)
         bool pomp_aan = cJSON_IsTrue(pomp);
         printf("Doel: %.1f C, pomp gevraagd: %s\n",
                doeltemperatuur, pomp_aan ? "aan" : "uit");
+        s_doel = doeltemperatuur;
+
+        // Pomp naar de website, alleen als hij verandert (retained topic)
+        if (s_pomp_gemeld != (int)pomp_aan && brouw_mqtt_is_verbonden() &&
+            brouw_mqtt_publiceer("actuator/pomp/state", pomp_aan ? "on" : "off") == ESP_OK)
+        {
+            s_pomp_gemeld = pomp_aan;
+        }
 
         //Hier de doeltemperatuur en pomptoestand doorgeven aan de PID-regelaar en sturing pomp
         //Ontbrekende kp/ki/kd moeten daar hun vorige waarde behouden
     }
     else if (strcmp(bericht->onderwerp, "brouw/status") == 0)
     {
-        // Alleen voor de website: later doorsturen naar MQTT. Niets terugsturen naar het scherm.
+        // Alleen voor de website: doorsturen naar MQTT. Niets terugsturen naar het scherm.
+        if (brouw_mqtt_is_verbonden())
+        {
+            brouw_mqtt_publiceer("brouw/status", bericht->json);
+        }
     }
     else if (strcmp(bericht->onderwerp, "net/start") == 0)
     {
@@ -524,6 +655,11 @@ void app_main(void)
     if (xTaskCreate(recept_taak, "recept", 1024 * 8, NULL, 5, NULL) != pdPASS)
     {
         ESP_LOGE("main", "Kan recepttaak niet starten");
+    }
+
+    if (xTaskCreate(opdracht_taak, "opdracht", 1024 * 4, NULL, 5, NULL) != pdPASS)
+    {
+        ESP_LOGE("main", "Kan opdrachttaak niet starten");
     }
 
     if (xTaskCreate(net_toestand_taak, "net_toestand", 1024 * 8, NULL, 5, NULL) != pdPASS) 
