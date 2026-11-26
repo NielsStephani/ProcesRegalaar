@@ -389,11 +389,62 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
+static esp_err_t mqtt_naam_toepassen(void)
+{
+    char ketel_id[64] = "";
+
+    const esp_err_t fout =
+        brouw_netwerk_lees_ketel_id(ketel_id);
+
+    // Nog geen ID opgeslagen: gebruik de bestaande standaardnaam.
+    if (fout == ESP_ERR_NOT_FOUND) {
+        return ESP_OK;
+    }
+
+    if (fout != ESP_OK) {
+        return fout;
+    }
+
+    cJSON *info = cJSON_Parse(s_info_json);
+
+    if (info == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    cJSON *naam_veld =
+        cJSON_GetObjectItemCaseSensitive(info, "name");
+
+    if (!cJSON_IsString(naam_veld) ||
+        cJSON_SetValuestring(naam_veld, ketel_id) == NULL) {
+        cJSON_Delete(info);
+        return ESP_ERR_NO_MEM;
+    }
+
+    char *nieuwe_info = cJSON_PrintUnformatted(info);
+    cJSON_Delete(info);
+
+    if (nieuwe_info == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    cJSON_free(s_info_json);
+    s_info_json = nieuwe_info;
+
+    return ESP_OK;
+}
+
 static esp_err_t start_client(void)
 {
     brouw_netwerk_mqtt_t instellingen;
     esp_err_t fout = brouw_netwerk_lees_mqtt(&instellingen);
     if (fout != ESP_OK) {
+        return fout;
+    }
+
+    fout = mqtt_naam_toepassen();
+
+    if (fout != ESP_OK) 
+    {
         return fout;
     }
 

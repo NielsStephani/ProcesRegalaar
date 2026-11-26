@@ -6,6 +6,67 @@
 #define INSTELLINGEN_VERSIE 1
 #define NVS_NAMESPACE "brouw_netwerk"
 #define NVS_SLEUTEL "instellingen"
+#define NVS_KETEL_ID_SLEUTEL "ketel_id"
+
+const char *brouw_ketel_id_fout(const char *ketel_id)
+{
+    if (ketel_id == NULL) {
+        return "Vul een ketel-ID in.";
+    }
+
+    const size_t lengte = strnlen(ketel_id, 64);
+
+    if (lengte == 0 || lengte > 63) {
+        return "De ketel-ID moet 1 tot 63 bytes bevatten.";
+    }
+
+    if (ketel_id[0] == ' ' || ketel_id[lengte - 1] == ' ') {
+        return "De ketel-ID mag niet beginnen of eindigen met een spatie.";
+    }
+
+    for (size_t i = 0; i < lengte; ++i) {
+        const unsigned char teken = (unsigned char)ketel_id[i];
+
+        if (teken < ' ' || teken == 0x7f) {
+            return "De ketel-ID bevat een ongeldig teken.";
+        }
+    }
+
+    return NULL;
+}
+
+esp_err_t brouw_netwerk_lees_ketel_id(char ketel_id[64])
+{
+    if (ketel_id == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ketel_id[0] = '\0';
+
+    nvs_handle_t nvs;
+    esp_err_t fout = nvs_open(
+        NVS_NAMESPACE, NVS_READONLY, &nvs);
+
+    if (fout == ESP_OK) {
+        size_t lengte = 64;
+
+        fout = nvs_get_str(
+            nvs, NVS_KETEL_ID_SLEUTEL, ketel_id, &lengte);
+
+        nvs_close(nvs);
+    }
+
+    if (fout == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    if (fout != ESP_OK) {
+        return fout;
+    }
+
+    return brouw_ketel_id_fout(ketel_id) == NULL
+           ? ESP_OK : ESP_ERR_INVALID_ARG;
+}
 
 static bool ascii_letter_of_cijfer(char teken)
 {
@@ -98,19 +159,36 @@ esp_err_t brouw_instellingen_lees(brouw_instellingen_t *instellingen)
     return brouw_instellingen_fout(instellingen) == NULL ? ESP_OK : ESP_ERR_INVALID_ARG;
 }
 
-esp_err_t brouw_instellingen_bewaar(brouw_instellingen_t *instellingen)
+esp_err_t brouw_instellingen_bewaar(
+    brouw_instellingen_t *instellingen,
+    const char *ketel_id)
 {
+    if (brouw_ketel_id_fout(ketel_id) != NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
     nvs_handle_t nvs;
-    esp_err_t fout = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    esp_err_t fout = nvs_open(
+        NVS_NAMESPACE, NVS_READWRITE, &nvs);
+
     if (fout != ESP_OK) {
         return fout;
     }
 
     instellingen->versie = INSTELLINGEN_VERSIE;
-    fout = nvs_set_blob(nvs, NVS_SLEUTEL, instellingen, sizeof(*instellingen));
+
+    fout = nvs_set_blob(
+        nvs, NVS_SLEUTEL, instellingen, sizeof(*instellingen));
+
+    if (fout == ESP_OK) {
+        fout = nvs_set_str(
+            nvs, NVS_KETEL_ID_SLEUTEL, ketel_id);
+    }
+
     if (fout == ESP_OK) {
         fout = nvs_commit(nvs);
     }
+
     nvs_close(nvs);
     return fout;
 }

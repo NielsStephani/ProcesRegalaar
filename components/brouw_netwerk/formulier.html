@@ -96,6 +96,15 @@
           Wachtwoord tonen
         </label>
       </fieldset>
+      <fieldset disabled>
+        <legend>Brouwketel</legend>
+        <label for="ketel_id">Ketel-ID</label>
+        <input id="ketel_id" name="ketel_id"
+          required maxlength="63"
+          spellcheck="false" autocapitalize="none">
+
+      <small>Geef een unieke naam op voor de brouwketel. Deze benaming vind je terug in de lijst van apparaten op de site.</small>
+      </fieldset>
       <button id="opslaan" type="submit" disabled>Opslaan en verbinden</button>
     </form>
     <button id="opnieuw_laden" type="button" hidden>Opnieuw laden</button>
@@ -107,7 +116,7 @@
     const opnieuwLaden = document.getElementById("opnieuw_laden");
     const veldnamen = [
       "ssid", "wifi_wachtwoord", "mqtt_host", "mqtt_poort",
-      "mqtt_gebruikersnaam", "mqtt_wachtwoord"
+      "mqtt_gebruikersnaam", "mqtt_wachtwoord", "ketel_id"
     ];
 
     for (const naam of ["wifi_wachtwoord", "mqtt_wachtwoord"]) {

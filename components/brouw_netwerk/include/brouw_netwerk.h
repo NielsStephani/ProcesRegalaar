@@ -29,11 +29,12 @@ esp_err_t brouw_netwerk_vraag_setup(void);
 esp_err_t brouw_netwerk_vraag_werking(void);
 esp_err_t brouw_netwerk_start(const char *setup_wachtwoord, bool setup_afdwingen);
 brouw_netwerk_status_t brouw_netwerk_status(void);
-esp_err_t brouw_netwerk_lees_mqtt(brouw_netwerk_mqtt_t *mqtt);
 uint32_t brouw_netwerk_configuratienummer(void);
 bool brouw_netwerk_verbindingspoging_klaar(void);
 void brouw_netwerk_configuratie_opgeslagen(void);
 esp_err_t brouw_netwerk_lees_ssid(char ssid[33]);
+esp_err_t brouw_netwerk_lees_mqtt(brouw_netwerk_mqtt_t *mqtt);
+esp_err_t brouw_netwerk_lees_ketel_id(char ketel_id[64]);
 
 #ifdef __cplusplus
 }

@@ -288,7 +288,7 @@ void temp_task(void *parameters)
 
     while (1)
     {
-        float temperature_c = 0.0f;
+        float temperature_c = 0.00f;
         esp_err_t meting = max31865_read_temperature(&sensor, &temperature_c);
         bool ok = (meting == ESP_OK && isfinite(temperature_c));
 
@@ -296,7 +296,7 @@ void temp_task(void *parameters)
         char json[100];
         if (ok)
         {
-            snprintf(json, sizeof(json), "{\"temp\":%.1f,\"ok\":true,\"vermogen\":%d}",
+            snprintf(json, sizeof(json), "{\"temp\":%.2f,\"ok\":true,\"vermogen\":%d}",
                      temperature_c, heating_power);
             printf("Temperatuur: %.2f °C\n", temperature_c);
         }
@@ -319,7 +319,7 @@ void temp_task(void *parameters)
 
             if (ok)
             {
-                snprintf(tekst, sizeof(tekst), "%.1f", temperature_c);
+                snprintf(tekst, sizeof(tekst), "%.2f", temperature_c);
                 brouw_mqtt_publiceer("sensor/temperatuur", tekst);
             }
 

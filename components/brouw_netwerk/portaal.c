@@ -59,7 +59,7 @@ static bool decodeer_veld(char *uit, size_t capaciteit, const char *in)
     return true;
 }
 
-static const char *formulier_lezen(char *inhoud, brouw_instellingen_t *instellingen)
+static const char *formulier_lezen(char *inhoud, brouw_instellingen_t *instellingen, char ketel_id[64])
 {
     char poort[6];
     struct {
@@ -74,6 +74,7 @@ static const char *formulier_lezen(char *inhoud, brouw_instellingen_t *instellin
         {"mqtt_poort", poort, sizeof(poort), false},
         {"mqtt_gebruikersnaam", instellingen->mqtt.gebruikersnaam, sizeof(instellingen->mqtt.gebruikersnaam), false},
         {"mqtt_wachtwoord", instellingen->mqtt.wachtwoord, sizeof(instellingen->mqtt.wachtwoord), false},
+        {"ketel_id", ketel_id, 64, false},
     };
     const size_t aantal_velden = sizeof(velden) / sizeof(velden[0]);
     char *volgend = NULL;
@@ -121,6 +122,13 @@ static const char *formulier_lezen(char *inhoud, brouw_instellingen_t *instellin
         }
         mqtt->poort = (uint16_t)poort_nummer;
     }
+
+    const char *id_fout = brouw_ketel_id_fout(ketel_id);
+    if (id_fout != NULL) 
+    {
+        return id_fout;
+    }
+
     return brouw_instellingen_fout(instellingen);
 }
 
@@ -183,6 +191,17 @@ static esp_err_t instellingen_get(httpd_req_t *verzoek)
         return antwoord(verzoek, "500 Internal Server Error", "De instellingen konden niet worden geladen.");
     }
 
+    char ketel_id[64] = "";
+
+const esp_err_t id_fout =
+    brouw_netwerk_lees_ketel_id(ketel_id);
+
+    if (id_fout != ESP_OK && id_fout != ESP_ERR_NOT_FOUND) {
+        return antwoord(
+            verzoek,
+            "500 Internal Server Error",
+            "De ketel-ID kon niet worden geladen.");
+    }
     char poort[6] = "";
     if (instellingen.mqtt.poort != 0) {
         snprintf(poort, sizeof(poort), "%u", (unsigned)instellingen.mqtt.poort);
@@ -197,6 +216,7 @@ static esp_err_t instellingen_get(httpd_req_t *verzoek)
         {"mqtt_poort", poort},
         {"mqtt_gebruikersnaam", instellingen.mqtt.gebruikersnaam},
         {"mqtt_wachtwoord", instellingen.mqtt.wachtwoord},
+        {"ketel_id", ketel_id},
     };
 
     cJSON *json = cJSON_CreateObject();
@@ -263,13 +283,15 @@ static esp_err_t formulier_post(httpd_req_t *verzoek)
     inhoud[ontvangen] = '\0';
 
     brouw_instellingen_t instellingen = {0};
-    const char *invoerfout = formulier_lezen(inhoud, &instellingen);
+    char ketel_id[64] = "";
+
+    const char *invoerfout = formulier_lezen(inhoud, &instellingen, ketel_id);
     free(inhoud);
     if (invoerfout != NULL) {
         return antwoord(verzoek, "400 Bad Request", invoerfout);
     }
 
-    const esp_err_t fout = brouw_instellingen_bewaar(&instellingen);
+    const esp_err_t fout = brouw_instellingen_bewaar(&instellingen, ketel_id);
     if (fout != ESP_OK) {
         ESP_LOGE(TAG, "Opslaan in NVS: %s", esp_err_to_name(fout));
         return antwoord(verzoek, "500 Internal Server Error", "Opslaan mislukt. De ESP32 blijft in setupmodus.");

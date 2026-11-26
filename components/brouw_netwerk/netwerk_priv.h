@@ -17,8 +17,9 @@ typedef struct {
 
 bool brouw_wpa_wachtwoord_geldig(const char *wachtwoord);
 esp_err_t brouw_instellingen_lees(brouw_instellingen_t *instellingen);
-esp_err_t brouw_instellingen_bewaar(brouw_instellingen_t *instellingen);
+esp_err_t brouw_instellingen_bewaar(brouw_instellingen_t *instellingen, const char *ketel_id);
 const char *brouw_instellingen_fout(const brouw_instellingen_t *instellingen);
 esp_err_t brouw_portaal_start(TaskHandle_t netwerktaak, httpd_handle_t *server);
+const char *brouw_ketel_id_fout(const char *ketel_id);
 
 #endif
