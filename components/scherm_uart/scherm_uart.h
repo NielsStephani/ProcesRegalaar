@@ -3,8 +3,9 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 
-// Maximaal 512 bytes per regel, inclusief de afsluitende '\n'.
-#define SCHERM_UART_REGEL_MAX 512
+// Maximaal 1536 bytes per regel, inclusief de afsluitende '\n'.
+// Zo groot voor het brouwverslag (brouw/verslag), het langste bericht.
+#define SCHERM_UART_REGEL_MAX 1536
 
 typedef struct
 {

@@ -52,6 +52,7 @@ typedef enum {
     TOPIC_FOUT,
     TOPIC_BROUW_STATUS,
     TOPIC_BROUW_MELDING,
+    TOPIC_BROUW_VERSLAG,
     TOPIC_AANTAL,
 } topic_t;
 
@@ -71,6 +72,7 @@ static const struct {
     [TOPIC_FOUT]        = { "fout",                        1, false },
     [TOPIC_BROUW_STATUS]  = { "brouw/status",              0, true  },   /* elke seconde van het scherm */
     [TOPIC_BROUW_MELDING] = { "brouw/melding",             1, false },   /* gebeurtenis: start, pauze, ... */
+    [TOPIC_BROUW_VERSLAG] = { "brouw/verslag",             1, true  },   /* brouwverslag op het einde (blijft staan) */
 };
 
 typedef struct {

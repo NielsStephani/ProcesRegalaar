@@ -23,6 +23,7 @@ static bool onderwerp_ontvangen_bekend(const char *onderwerp)
     return strcmp(onderwerp, "brouw/stuur") == 0 ||
            strcmp(onderwerp, "brouw/status") == 0 ||
            strcmp(onderwerp, "brouw/meld") == 0 ||
+           strcmp(onderwerp, "brouw/verslag") == 0 ||   // brouwverslag op het einde
            strcmp(onderwerp, "net/start") == 0 ||
            strcmp(onderwerp, "net/stop") == 0 ||
            strcmp(onderwerp, "net/modus") == 0;

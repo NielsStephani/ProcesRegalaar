@@ -53,6 +53,28 @@ static char s_start_id[64] = "";                  // message_id van cmd/start da
 static TickType_t s_start_tijd = 0;
 static portMUX_TYPE s_start_slot = portMUX_INITIALIZER_UNLOCKED;
 
+/* ---- Brouwverslag ----
+ * Op het einde van de sessie stuurt het scherm brouw/verslag (met nr, net als een
+ * melding). Wij zetten het zonder nr op MQTT brouw/verslag. Lukt dat niet (geen
+ * MQTT), dan bewaren we het en probeert receive_task het elke 2 s opnieuw.
+ * Alleen receive_task gebruikt deze variabelen. */
+#define VERSLAG_HERPROBEER_MS 2000
+static char s_verslag[SCHERM_UART_REGEL_MAX] = "";   // leeg = niets te versturen
+static TickType_t s_verslag_poging = 0;
+
+static void verslag_publiceren(void)
+{
+    if (s_verslag[0] == '\0' || !brouw_mqtt_is_verbonden())
+    {
+        return;
+    }
+    if (brouw_mqtt_publiceer("brouw/verslag", s_verslag) == ESP_OK)
+    {
+        ESP_LOGI("verslag", "Brouwverslag op MQTT gezet.");
+        s_verslag[0] = '\0';
+    }
+}
+
 // Laatste wensen van het scherm (uit brouw/stuur)
 static volatile float s_doel = 0.0f;              // doeltemperatuur, 0 = verwarming uit
 static int s_pomp_gemeld = -1;                    // wat er laatst op actuator/pomp/state stond (-1 = nog niets)
@@ -257,39 +279,17 @@ esp_err_t spi_init(void)
 void temp_task(void *parameters)
 {
     esp_err_t err;
-#if CONFIG_BROUW_NEP_TEMPERATUUR
-    // Thuis testen zonder PT100: geen sensor uitlezen, zie nep_meting hieronder
-    float nep_temp = 20.0f;
-    printf("LET OP: nep-temperatuur staat aan (menuconfig > Brouwketel)\n");
-#else
     err = spi_init();
     if (err != ESP_OK)
     {
         printf("Failed to initialize SPI: %s\n", esp_err_to_name(err));
         vTaskDelete(NULL);
     }
-#endif
 
     while (1)
     {
         float temperature_c = 0.0f;
-#if CONFIG_BROUW_NEP_TEMPERATUUR
-        // Kouder dan het doel: verwarming vol aan, 1 graad per seconde erbij.
-        // Anders verwarming uit en langzaam afkoelen (niet onder 20, niet boven 100).
-        const float doel = s_doel;
-        if (doel > 0.0f && nep_temp < doel) {
-            heating_power = 100;
-            nep_temp += 1.0f;
-        } else {
-            heating_power = 0;
-            nep_temp -= 0.1f;
-        }
-        nep_temp = fminf(fmaxf(nep_temp, 20.0f), 100.0f);
-        temperature_c = nep_temp;
-        esp_err_t meting = ESP_OK;
-#else
         esp_err_t meting = max31865_read_temperature(&sensor, &temperature_c);
-#endif
         bool ok = (meting == ESP_OK && isfinite(temperature_c));
 
         // 1. Naar het scherm (zoals voorheen)
@@ -415,7 +415,16 @@ static void opdracht_taak(void *arg)
                     brouw_mqtt_ack(opdracht.message_id, false, "er wacht al een startopdracht op het scherm");
                 } else {
                     ESP_LOGI("start", "Startopdracht %s naar het scherm.", opdracht.message_id);
-                    scherm_uart_verstuur("brouw/start", "{}");
+                    const esp_err_t fout = scherm_uart_verstuur("brouw/start", "{}");
+                    if (fout != ESP_OK) {
+                        // Niet verstuurd: meteen een negatieve ack, niet 5 s wachten
+                        ESP_LOGW("start", "brouw/start versturen mislukt: %s", esp_err_to_name(fout));
+                        char id[64];
+                        start_id_nemen(id, sizeof(id));
+                        if (id[0] != '\0') {
+                            brouw_mqtt_ack(id, false, "kan het scherm niet bereiken");
+                        }
+                    }
                 }
             }
         }
@@ -502,6 +511,34 @@ static void bericht_verwerken(const scherm_uart_bericht_t *bericht)
                                        ok ? NULL : (reden != NULL && reden[0] != '\0'
                                                     ? reden : "scherm kan niet starten"));
                     }
+                }
+            }
+        }
+    }
+    else if (strcmp(bericht->onderwerp, "brouw/verslag") == 0)
+    {
+        cJSON* nummer = cJSON_GetObjectItemCaseSensitive(data, "nr");
+        if (cJSON_IsNumber(nummer) && nummer->valuedouble >= 1 &&
+            nummer->valuedouble <= INT_MAX &&
+            nummer->valuedouble == (int)nummer->valuedouble)
+        {
+            int nr = (int)nummer->valuedouble;
+            char ack[32];
+            snprintf(ack, sizeof(ack), "{\"nr\":%d}", nr);
+            scherm_uart_verstuur("ack", ack);      // altijd bevestigen, ook bij herhaling
+
+            if (message_is_new(nr))
+            {
+                // nr is alleen voor de kabel: zonder nr naar de website
+                cJSON_DeleteItemFromObjectCaseSensitive(data, "nr");
+                char *zonder_nr = cJSON_PrintUnformatted(data);
+                if (zonder_nr != NULL)
+                {
+                    ESP_LOGI("verslag", "Brouwverslag ontvangen (%u tekens).", (unsigned)strlen(zonder_nr));
+                    strlcpy(s_verslag, zonder_nr, sizeof(s_verslag));
+                    cJSON_free(zonder_nr);
+                    s_verslag_poging = xTaskGetTickCount();
+                    verslag_publiceren();
                 }
             }
         }
@@ -620,6 +657,14 @@ void receive_task(void *parameters)
             //Hier komt de code om verwarming, pomp en zoemer uit te zetten bij onderbreking van verbinding
         }
 
+        // Brouwverslag dat nog niet op MQTT kon: opnieuw proberen
+        if (s_verslag[0] != '\0' &&
+            xTaskGetTickCount() - s_verslag_poging >= pdMS_TO_TICKS(VERSLAG_HERPROBEER_MS))
+        {
+            s_verslag_poging = xTaskGetTickCount();
+            verslag_publiceren();
+        }
+
         if(err == ESP_OK)
         {
             if(strcmp(bericht.onderwerp, "brouw/stuur") == 0)
@@ -657,7 +702,7 @@ void app_main(void)
         ESP_LOGE("main", "Kan recepttaak niet starten");
     }
 
-    if (xTaskCreate(opdracht_taak, "opdracht", 1024 * 4, NULL, 5, NULL) != pdPASS)
+    if (xTaskCreate(opdracht_taak, "opdracht", 1024 * 6, NULL, 5, NULL) != pdPASS)
     {
         ESP_LOGE("main", "Kan opdrachttaak niet starten");
     }
